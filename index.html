@@ -379,6 +379,9 @@ input.code{font-family:var(--f-dot);font-weight:400;color:var(--seiji);text-shad
   @keyframes fadein{to{opacity:1}}
 }
 
+.cell.peek-from{box-shadow:inset 0 0 0 3px var(--seiji)}
+.cell.peek-to{background:rgba(123,224,216,.32);box-shadow:inset 0 0 0 3px var(--seiji)}
+
 </style>
 </head>
 <body>
@@ -2410,9 +2413,22 @@ const ShogiPlan = (() => {
         if (!m) return releaseHold(g, '手を選べなかったため、陣形づくりを解除しました。');
         return finish(m, { kind: 'form', why: '' }, { src: 'plan', tip: planSafe(() => ShogiPlan.explainForm(g.defs, g.st, fid, m, r), null), formNote: r.p1.filled + '/' + r.p1.total });
       }
+      const c = candFor(g, mode);
+      const v = await c.p;
+      if (app.game !== g || g.ai !== tok) return;
+      if (!v) { Object.assign(tok, { state: 'none' }); render(); return; }
+      finish(v.m, v.r, { src: v.src, tip: v.tip, miss: v.miss, why: v.why });
+    }, (mode !== 'form' && g.pre && g.pre.n === g.st.n && g.pre[mode] && g.pre[mode].done) ? 0 : 60);
+  }
+  /* ---------- 候補の先読み：自分の番になった瞬間に、攻め・守りの手を用意しておく ---------- */
+  function computeCand(g, mode) {
+    return (async () => {
+      const n = g.st.n, gno = g.st.g, alive = () => app.game === g && g.st && g.st.n === n && g.st.g === gno;
+      await new Promise((r) => setTimeout(r, 30));
+      if (!alive()) return null;
       const hasExt = g.mode !== 'orig' && typeof ShogiExt !== 'undefined';
       if (hasExt && ShogiExt.status() === 'loading') { try { await ShogiExt.wait(45000); } catch (e) { /* 内蔵AIで続ける */ } }
-      if (app.game !== g || g.ai !== tok) return;
+      if (!alive()) return null;
       const useExt = hasExt && ShogiExt.ready();
       let r = null, src = 'int', tipInfo = null;
       try { r = (mode === 'atk' || !useExt) ? ShogiAI.suggest(g.defs, g.st, mode, { ms: useExt ? 700 : 1500 }) : null; } catch (e) { r = null; }
@@ -2423,13 +2439,44 @@ const ShogiPlan = (() => {
         if (em) { tipInfo = ShogiExt.lastInfo(); r = { move: em, kind: 'ext', why: '' }; src = 'ext'; }
         else if (!r) { try { r = ShogiAI.suggest(g.defs, g.st, mode, { ms: 1500 }); } catch (e) { r = null; } }
       }
-      if (app.game !== g || g.ai !== tok) return;
+      if (!alive()) return null;
       const m = r && r.move ? S.findMove(legalFor(g), r.move) : null;
-      if (!m) { Object.assign(tok, { state: 'none' }); render(); return; }
+      if (!m) return null;
       const tip = planSafe(() => ShogiPlan.explain(g.defs, g.st, mode, m, tipInfo), null);
       const miss = hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンの読み込みが終わっていません（少し待ってからもう一度押してください）' : '') : '';
-      finish(m, r, { src, tip, miss, why: r.kind === 'mate' || !tip ? r.why : tip[0] });
-    }, 60);
+      return { m, r, src, tip, miss, why: r.kind === 'mate' || !tip ? r.why : tip[0] };
+    })();
+  }
+  // 局面ごとの候補。atk／def の順に、1つずつ作る（エンジンは1本なので並べて走らせない）
+  function candFor(g, mode) {
+    if (!g.pre || g.pre.n !== g.st.n || g.pre.gno !== g.st.g) g.pre = { n: g.st.n, gno: g.st.g };
+    const pre = g.pre;
+    if (!pre[mode]) {
+      const slot = { done: false, val: null };
+      const prev = mode === 'def' && pre.atk ? pre.atk.p : Promise.resolve();
+      slot.p = prev.catch(() => null).then(() => (g.pre === pre ? computeCand(g, mode) : null)).catch(() => null).then((v) => {
+        slot.done = true; slot.val = v;
+        if (g.pre === pre && g.preNotify) g.preNotify();
+        return v;
+      });
+      pre[mode] = slot;
+    }
+    return pre[mode];
+  }
+  function warmUp(g) {
+    if (!g.st || g.st.res || !canAct(g)) return;
+    if (g.hold && g.hold.mode === 'form') return;
+    candFor(g, 'atk'); candFor(g, 'def');
+  }
+  function peekCells(g, mode, on) {
+    const cells = document.querySelectorAll('.board .cell');
+    cells.forEach((c) => c.classList.remove('peek-from', 'peek-to'));
+    if (!on) return;
+    const slot = g.pre && g.pre.n === g.st.n && g.pre[mode], m = slot && slot.val && slot.val.m;
+    if (!m) return;
+    const flip = mySide(g) === 1, at = (idx) => cells[flip ? 80 - idx : idx];
+    if (m.f >= 0 && at(m.f)) at(m.f).classList.add('peek-from');
+    if (at(m.to)) at(m.to).classList.add('peek-to');
   }
   function aiRun(g) {
     const ai = g.ai;
@@ -2453,10 +2500,25 @@ const ShogiPlan = (() => {
     const btn = (mode, ch, sub) => {
       const mine = !!ai && ai.mode === mode && ai.state === 'ready';
       const on = !!hold && hold.mode === mode;
-      const lines = mine ? (ai.tip || (ai.why ? [ai.why] : null)) : null;
+      const armedLines = mine ? (ai.tip || (ai.why ? [ai.why] : null)) : null;
+      const peekLines = () => {
+        if (mine) return armedLines;
+        const slot = g.pre && g.pre.n === g.st.n && g.pre[mode], v = slot && slot.val;
+        if (slot && slot.done && !v) return ['この局面では、候補の手が見つかりませんでした。'];
+        if (!v) return ['候補を用意しています…（自分の番になった直後に先読みしています）'];
+        let tp = null;
+        try { tp = S.notate(g.defs, g.st, v.m, legalFor(g)) + (v.m.f < 0 ? '（持ち駒を打つ）' : ''); } catch (e) { tp = ''; }
+        return ['候補：' + tp].concat(v.tip || (v.why ? [v.why] : []));
+      };
+      const lines = mode !== 'form' && act ? peekLines : null;
+      const showNow = () => {
+        if (!pop.isConnected) return;
+        showPop(el, peekLines()); peekCells(g, mode, true);
+      };
       let timer = 0, timer2 = 0, held = false;
+      let el = null;
       const gauge = mine && ai.timed ? h('span', { class: 'gauge', 'aria-hidden': 'true', style: 'animation-duration:' + GRACE + 'ms;animation-delay:-' + (Date.now() - ai.t0) + 'ms' }) : null;
-      const el = h('button', {
+      el = h('button', {
         class: 'ai-btn ' + mode + (mine ? ' armed' : '') + (on ? ' hold' : ''), type: 'button',
         disabled: mode === 'form' ? busy : (!act || busy), 'aria-pressed': String(mine || on),
         'aria-describedby': lines ? 'ai-pop' : null,
@@ -2471,18 +2533,18 @@ const ShogiPlan = (() => {
         h('small', null, on ? (mode === 'form' ? '組み上げ中（押すと解除）' : '継続中') : mine ? (ai.timed ? '3秒後に自動で指します' : 'もう一度押すと指します') : sub)));
       if (mode !== 'form') {
         if (lines) {
-          el.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') showPop(el, lines); });
-          el.addEventListener('pointerleave', hidePop);
-          el.addEventListener('focus', () => showPop(el, lines));
-          el.addEventListener('blur', hidePop);
+          el.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') { g.preNotify = showNow; showNow(); } });
+          el.addEventListener('pointerleave', () => { g.preNotify = null; hidePop(); peekCells(g, mode, false); });
+          el.addEventListener('focus', () => { g.preNotify = showNow; showNow(); });
+          el.addEventListener('blur', () => { g.preNotify = null; hidePop(); peekCells(g, mode, false); });
         }
         el.addEventListener('pointerdown', (e) => {
           held = false; clearTimeout(timer); clearTimeout(timer2);
-          if (lines && e.pointerType !== 'mouse') timer = setTimeout(() => { held = true; showPop(el, lines); }, 350);
+          if (lines && e.pointerType !== 'mouse') timer = setTimeout(() => { held = true; g.preNotify = showNow; showNow(); }, 350);
           // 長押し：選んだ手を、あなたの番のたびに自動で続ける（ホールド）
-          timer2 = setTimeout(() => { held = true; hidePop(); activateHold(g, mode); }, 800);
+          timer2 = setTimeout(() => { held = true; g.preNotify = null; hidePop(); peekCells(g, mode, false); activateHold(g, mode); }, 800);
         });
-        const end = () => { clearTimeout(timer); clearTimeout(timer2); hidePop(); if (held) setTimeout(() => { held = false; }, 400); };
+        const end = () => { clearTimeout(timer); clearTimeout(timer2); g.preNotify = null; hidePop(); peekCells(g, mode, false); if (held) setTimeout(() => { held = false; }, 400); };
         el.addEventListener('pointerup', end);
         el.addEventListener('pointercancel', end);
       }
@@ -2525,10 +2587,10 @@ const ShogiPlan = (() => {
       g.autoQ = setTimeout(() => { g.autoQ = 0; if (app.game === g && g.hold && !g.ai && canAct(g) && g.st && !g.st.res && sideNow(g) === g.hold.side) startAi(g, g.hold.mode); }, 250);
     }
     return h('div', { class: 'ai' },
-      h('p', { class: 'ai-h' }, 'AIに一手きく'),
+      h('p', { class: 'ai-h' }, 'AIコマンド'),
       h('div', { class: 'ai-btns' }, btn('atk', '攻', '王を詰ませにいく手'), btn('def', '守', '王を守り、攻めを止める手'), std ? btn('form', '陣', '選んだ陣形を組む') : null),
       status, g.holdMsg ? h('p', { class: 'ai-msg', role: 'status' }, g.holdMsg) : null,
-      !ai && !act && !hold ? h('p', { class: 'muted small' }, '自分の番のときに使えます。ボタンを長押しすると、その選択を続けます。') : null,
+      !ai && !act && !hold ? h('p', { class: 'muted small' }, '自分の番のときに使えます。ボタンにカーソルを置く（スマホは軽く押し続ける）と候補の手を表示し、長押しするとその選択を続けます。') : null,
       chooser, body, pop);
   }
   const mode_msg = (g, ai) => (ai && ai.mode === 'form' ? '陣形づくりの手順を探しています…' : ShogiExtLoading() ? 'エンジンを読み込んでいます（初回は少し時間がかかります）…' : '考えています…');
@@ -2579,6 +2641,7 @@ const ShogiPlan = (() => {
     if (g.ai && (g.ai.n !== st.n || g.ai.gno !== st.g)) g.ai = null;
     const view = me == null ? 0 : me, flip = view === 1;
     const act = canAct(g);
+    if (act) setTimeout(() => { if (app.game === g) warmUp(g); }, 0);
     const legal = act || g.ask ? legalFor(g) : [];
     const tg = new Map();
     if (g.sel && act) for (const m of legal) if (m.to != null && (g.sel.f >= 0 ? m.f === g.sel.f : (m.f < 0 && m.t === g.sel.t))) tg.set(m.to, true);
