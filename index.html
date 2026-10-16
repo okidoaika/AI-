@@ -721,6 +721,17 @@ const ShogiAI = (() => {
       a += Math.min(handN, 4);
       score += wA * a;
     }
+    if (mode === 'atk') {
+      // 攻め：駒を前に出して、相手の陣へ働かせる（玉は動かさない）
+      let adv = 0;
+      for (let i = 0; i < 81; i++) {
+        const pc = board[i];
+        if (!pc || pc.o !== me || pc.t === 'K') continue;
+        const y = (i / 9) | 0, prog = me === 0 ? 8 - y : y;
+        adv += prog * (pc.t === 'P' ? 0.25 : 0.45);
+      }
+      score += adv;
+    }
     if (km >= 0) {
       let d = 0, esc = 0;
       for (const z of ZONE[km]) {
@@ -800,7 +811,13 @@ const ShogiAI = (() => {
   // 反復深化。exact のときは全候補を正確に採点する（守りで上位の候補を比べるため）。
   function rootSearch(defs, st, mode, dl, maxDepth, exact) {
     const c = { defs, me: st.turn, mode, dl, nodes: 0 };
-    let order = orderMoves(defs, st, S.legalMoves(defs, st));
+    let all = S.legalMoves(defs, st);
+    if (mode === 'atk' && !S.inCheck(defs, st.board, st.turn)) {
+      // 攻めのときは、王手を受けている場合を除いて、玉を動かす手を選ばない
+      const nk = all.filter((m) => !(m.f >= 0 && st.board[m.f] && defs[st.board[m.f].t] && defs[st.board[m.f].t].king));
+      if (nk.length) all = nk;
+    }
+    let order = orderMoves(defs, st, all);
     let ranked = order.map((m) => ({ m, s: 0 }));
     for (let d = 1; d <= maxDepth; d++) {
       try {
@@ -935,7 +952,9 @@ const ShogiExt = (() => {
     return null;
   }
 
-  let state = 'idle', eng = null, waiter = null, started = null;
+  let state = 'idle', eng = null, waiter = null, started = null, reason = '';
+  const fail = (why) => { reason = why; state = 'none'; return state; };
+  const withTimeout = (p, ms, why) => Promise.race([p, new Promise((_, ng) => setTimeout(() => ng(new Error(why)), ms))]);
   const isolated = () => typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
   const loadScript = (src) => new Promise((ok, ng) => {
     const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => ng(new Error('load ' + src));
@@ -948,30 +967,30 @@ const ShogiExt = (() => {
   async function boot() {
     try {
       const head = await fetch('yaneuraou.js', { method: 'HEAD', cache: 'no-store' });
-      if (!head.ok) return (state = 'none');
+      if (!head.ok) return fail('yaneuraou.js が見つかりません（index.html と同じ場所に置いてください）');
       if (!isolated()) {
         // ページを「分離」状態にしないとエンジンは動かない（GitHub Pagesはヘッダーを付けられないので、Service Workerで付ける）
         let tried = false; try { tried = sessionStorage.getItem('sks.coi') === '1'; } catch (e) { /* 無視 */ }
         if (!tried && 'serviceWorker' in navigator) {
           try { sessionStorage.setItem('sks.coi', '1'); } catch (e) { /* 無視 */ }
-          await navigator.serviceWorker.register('coi-serviceworker.js');
+          try { await navigator.serviceWorker.register('coi-serviceworker.js'); } catch (e) { return fail('coi-serviceworker.js を読み込めません（同じ場所に置いてください）'); }
           if (!navigator.serviceWorker.controller) { location.reload(); return (state = 'loading'); }
         }
-        if (!isolated()) return (state = 'none');
+        if (!isolated()) return fail('ページが分離状態になっていません（coi-serviceworker.js が同じ場所にあるか、Safariでないか確認）');
       }
       await loadScript('yaneuraou.js');
-      eng = await window.YaneuraOu();
+      eng = await withTimeout(window.YaneuraOu(), 60000, 'エンジンの本体（yaneuraou.wasm / .data / .worker.js）を読み込めません。4つとも同じ場所に置いたか確認してください');
       eng.addMessageListener((line) => { if (waiter) waiter(String(line)); });
       let ok = (async () => { const p = waitFor((l) => l === 'usiok', 20000); eng.postMessage('usi'); return p; })();
-      if (!(await ok)) return (state = 'none');
+      if (!(await ok)) return fail('エンジンが応答しません');
       const th = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
       for (const o of ['USI_Ponder value false', 'USI_OwnBook value false', 'USI_Hash value 64', 'Threads value ' + th]) eng.postMessage('setoption name ' + o);
       const p2 = waitFor((l) => l === 'readyok', 30000); eng.postMessage('isready');
-      state = (await p2) ? 'ready' : 'none';
-    } catch (e) { state = 'none'; }
+      if (await p2) state = 'ready'; else fail('エンジンの準備が終わりません');
+    } catch (e) { fail(String((e && e.message) || e)); }
     return state;
   }
-  function init() { if (!started) started = boot(); return started; }
+  function init() { if (!started) { state = 'loading'; started = boot(); } return started; }
   /* 指し手をUSI文字列で返す。使えない・失敗のときは null */
   async function ask(st, ms) {
     if (state !== 'ready' || !eng) return null;
@@ -983,7 +1002,7 @@ const ShogiExt = (() => {
     if (!ok) { eng.postMessage('stop'); return null; }
     return best && parseMove(best) ? best : null;
   }
-  return { sfen, parseMove, init, ask, ready: () => state === 'ready', status: () => state,
+  return { sfen, parseMove, init, ask, why: () => reason, wait: (ms) => (started && state === 'loading' || state === 'idle' ? withTimeout(started || init(), ms, 'timeout').catch(() => state) : Promise.resolve(state)), ready: () => state === 'ready', status: () => state,
     _test: (e) => { eng = e; state = 'ready'; eng.addMessageListener((line) => { if (waiter) waiter(String(line)); }); } };
 })();
 
@@ -1911,7 +1930,10 @@ const ShogiExt = (() => {
     g.ai = tok; g.sel = null; g.confirm = null; render();
     setTimeout(async () => {
       if (app.game !== g || g.ai !== tok || !g.st) return;
-      const useExt = g.mode !== 'orig' && typeof ShogiExt !== 'undefined' && ShogiExt.ready();
+      const hasExt = g.mode !== 'orig' && typeof ShogiExt !== 'undefined';
+      if (hasExt && ShogiExt.status() === 'loading') { try { await ShogiExt.wait(20000); } catch (e) { /* 内蔵AIで続ける */ } }
+      if (app.game !== g || g.ai !== tok) return;
+      const useExt = hasExt && ShogiExt.ready();
       let r = null, src = 'int';
       try { r = (mode === 'atk' || !useExt) ? ShogiAI.suggest(g.defs, g.st, mode, { ms: useExt ? 700 : 1500 }) : null; } catch (e) { r = null; }
       if (useExt && !(r && r.kind === 'mate')) {
@@ -1924,7 +1946,7 @@ const ShogiExt = (() => {
       if (app.game !== g || g.ai !== tok) return;
       const legal = legalFor(g), m = r && r.move ? S.findMove(legal, r.move) : null;
       if (!m) Object.assign(tok, { state: 'none' });
-      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
+      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, miss: hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンを読み込み中です' : '') : '', why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
       render();
     }, 60);
   }
@@ -1948,6 +1970,7 @@ const ShogiExt = (() => {
       h('p', { class: 'ai-move' }, ai.text),
       h('p', { class: 'muted small' }, ai.why),
       h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI')),
+      ai.src !== 'ext' && ai.miss ? h('p', { class: 'muted small' }, 'エンジンを使えない理由：' + ai.miss) : null,
       h('p', { class: 'muted small' }, '盤の枠でかこんだ升が、動かす駒と行き先です。'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', type: 'button', onclick: () => aiRun(g) }, 'この手を指す'),
