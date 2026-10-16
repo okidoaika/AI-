@@ -1130,12 +1130,12 @@ const ShogiPlan = (() => {
     const slots = form.slots.map((s) => ({ t: s[0], i: slotIdx(o, s[1], s[2]), c: s[3], d: null }));
     const used = new Set(), pcs = [];
     board.forEach((c, i) => { if (c && c.o === o && !c.p) pcs.push({ i, t: c.t }); });
-    for (const s of slots) { const c = board[s.i]; if (c && c.o === o && c.t === s.t && !c.p) { s.d = 0; used.add(s.i); } }
+    for (const s of slots) { const c = board[s.i]; if (c && c.o === o && c.t === s.t && !c.p) { s.d = 0; s.pi = s.i; used.add(s.i); } }
     const pairs = [];
     slots.forEach((s, si) => { if (s.d === null) for (const p of pcs) if (p.t === s.t && !used.has(p.i)) { const [ax, ay] = xy(p.i), [bx, by] = xy(s.i); pairs.push({ si, pi: p.i, d: Math.max(Math.abs(ax - bx), Math.abs(ay - by)) }); } });
     pairs.sort((a, b) => a.d - b.d);
     const usedP = new Set();
-    for (const q of pairs) if (slots[q.si].d === null && !usedP.has(q.pi)) { slots[q.si].d = q.d; usedP.add(q.pi); }
+    for (const q of pairs) if (slots[q.si].d === null && !usedP.has(q.pi)) { slots[q.si].d = q.d; slots[q.si].pi = q.pi; usedP.add(q.pi); }
     const h = Object.assign({}, hands[o] || {});
     for (const s of slots) if (s.d === null) { if (h[s.t] > 0) { h[s.t]--; s.d = 1; } else s.d = 8; }
     // 持ち場に別の味方の駒が居座っていたら、どいてもらう必要がある（その分だけ遠い）
@@ -1229,68 +1229,99 @@ const ShogiPlan = (() => {
   /* ---- 陣形づくり ---- */
   function formStatus(defs, board, hands, o, id) { const F = FORMS[id]; const p = progress(defs, board, hands, o, F); return { done: p.D === 0, filled: p.filled, total: p.total, D: p.D }; }
   const lossOf = (defs, board, o) => threatsOn(defs, board, o).filter((t) => t.lose).reduce((a, t) => a + t.v, 0);
-  /* 相手が動かないものとして、自分の手だけで目標まで進む道筋をビームサーチで探し、その最初の一手を選ぶ。
-     最初の一手は、相手に駒をタダ取りされたり詰まされたりしないものだけを使う。 */
-  function nextFormMove(defs, st, id, ms) {
+  /* 陣形づくりに関係する駒：持ち場へ向かう駒、持ち場や通り道（二点を囲む長方形）をふさいでいる味方の駒 */
+  function relevant(board, o, pr) {
+    const R = new Set(), types = new Set();
+    for (const s of pr.slots) {
+      types.add(s.t);
+      if (s.pi != null) R.add(s.pi);
+      if (s.d === 0) continue;
+      const a = s.pi != null ? xy(s.pi) : xy(s.i), z = xy(s.i);
+      for (let x = Math.min(a[0], z[0]); x <= Math.max(a[0], z[0]); x++) for (let y = Math.min(a[1], z[1]); y <= Math.max(a[1], z[1]); y++) {
+        const c = board[y * 9 + x]; if (c && c.o === o) R.add(y * 9 + x);
+      }
+    }
+    return { R, types };
+  }
+  const tryMate3 = (defs, st, ms) => { try { return !!ShogiAI.mateSearch(defs, Object.assign({}, st, { turn: 1 - st.turn }), 3, Date.now() + ms); } catch (e) { return false; } };
+  /* 陣形づくりの一手。
+     1) 王手・詰みの狙い・駒のタダ取りをされそうなときは、陣形づくりを一時中断して守る
+     2) 大駒をタダで取れるときは取る
+     3) それ以外は、相手が動かないものとして、自分の手だけで目標まで進む最短の道筋をビームサーチで探し、
+        その最初の一手を選ぶ（関係のない駒は動かさない。最初の一手は、駒損・詰みの危険がないものだけ） */
+  const ownKey = (board, o) => board.map((c, i) => (c && c.o === o ? c.t + (c.p ? '+' : '') + i : '')).join(',');
+  function nextFormMove(defs, st, id, ms, avoid) {
     const F = FORMS[id], o = st.turn, t0 = Date.now(), limit = ms || 900;
     const p0 = progress(defs, st.board, st.hands, o, F);
     if (p0.D === 0) return { done: true, p0 };
     const ranked = ShogiAI.rank(defs, st, 'def', Math.min(600, limit));
     if (!ranked.length) return null;
     const best = ranked[0].s, loss0 = lossOf(defs, st.board, o);
-    const safeFirst = new Map();
+    const after = (m) => { const nx = S.applyMove(defs, st, m, true); return { nx, p1: progress(defs, nx.board, nx.hands, o, F) }; };
+    // 1) 緊急
+    const inChk = S.inCheck(defs, st.board, o);
+    const why = inChk ? 'check' : loss0 >= 5 ? 'hang' : tryMate3(defs, st, 250) ? 'mate' : null;
+    if (why) { const m = ranked[0].m; return { move: m, p0, p1: after(m).p1, interrupt: why }; }
+    // 2) 得な駒取り
+    const topCap = ranked[0].m.f >= 0 ? st.board[ranked[0].m.to] : null;
+    if (topCap && !isKing(defs, topCap) && cost(defs, topCap) >= 5) { const m = ranked[0].m; return { move: m, p0, p1: after(m).p1, interrupt: 'capture' }; }
+    // 3) 陣形づくり
+    const rel0 = relevant(st.board, o, p0);
+    const okMove = (m, rel) => (m.f < 0 ? rel.types.has(m.t) : rel.R.has(m.f));
+    const firsts = new Map();
     for (const { m, s } of ranked) {
-      if (s < best - 9) continue;
-      const nx = S.applyMove(defs, st, m, true);
+      if (!okMove(m, rel0) || s < best - 9) continue;
+      const { nx, p1 } = after(m);
       if (lossOf(defs, nx.board, o) > loss0 + 4) continue;
-      safeFirst.set(S.encBoard(nx.board) + JSON.stringify(nx.hands) + '|' + (m.f < 0 ? m.t + m.to : m.f + '-' + m.to + (m.p ? '+' : '')), { m, s });
+      if (avoid && avoid.has(ownKey(nx.board, o))) continue; // 同じ並びに戻る手（行ったり来たり）は選ばない
+      firsts.set(m.f + ':' + m.to + ':' + (m.t || '') + ':' + (m.p ? '+' : ''), { m, s, nx, p1 });
     }
-    const firsts = new Map(); // 最初の一手の記号 → {m, s}
-    for (const [, v] of safeFirst) firsts.set(v.m.f + ':' + v.m.to + ':' + (v.m.t || '') + ':' + (m_p(v.m)), v);
-    if (!firsts.size) return { stuck: true, p0 };
+    const fallback = () => { const m = ranked[0].m; return { move: m, p0, p1: after(m).p1, interrupt: 'stall', fallback: true }; };
+    if (!firsts.size) return fallback();
     let beam = [], seen = new Set();
-    const K = 14;
-    for (const [key, v] of firsts) {
-      const nx = S.applyMove(defs, st, v.m, true), pr = progress(defs, nx.board, nx.hands, o, F);
-      beam.push({ st: Object.assign({}, nx, { turn: o }), key, v, D: pr.D, steps: 1, pr });
-    }
+    const K = 36;
+    for (const [key, v] of firsts) beam.push({ st: Object.assign({}, v.nx, { turn: o }), key, v, D: v.p1.D, steps: 1, pr: v.p1 });
     let hit = beam.filter((e) => e.D === 0);
-    for (let depth = 1; depth < 16 && !hit.length && Date.now() - t0 < limit * 3; depth++) {
+    for (let depth = 1; depth < 20 && !hit.length && Date.now() - t0 < limit * 3; depth++) {
       const next = [];
       for (const e of beam) {
+        const rel = relevant(e.st.board, o, e.pr);
         for (const m of S.legalMoves(defs, e.st, { noUchi: true })) {
+          if (!okMove(m, rel)) continue;
           const nx = S.applyMove(defs, e.st, m, true), k = S.encBoard(nx.board) + JSON.stringify(nx.hands);
           if (seen.has(k)) continue; seen.add(k);
           const pr = progress(defs, nx.board, nx.hands, o, F);
-          next.push({ st: Object.assign({}, nx, { turn: o }), key: e.key, v: e.v, D: pr.D, steps: e.steps + 1, pr: e.pr });
+          next.push({ st: Object.assign({}, nx, { turn: o }), key: e.key, v: e.v, D: pr.D, steps: e.steps + 1, pr });
         }
       }
       if (!next.length) break;
-      next.sort((x, y) => x.D - y.D);
       hit = next.filter((e) => e.D === 0);
-      // 最初の一手が偏らないよう、手ごとに上位をバランスよく残す
+      next.sort((x, y) => (x.steps + x.D) - (y.steps + y.D) || x.D - y.D);
       const per = new Map(), kept = [];
-      for (const e of next) { const c = per.get(e.key) || 0; if (c < 3 && kept.length < K * 3) { per.set(e.key, c + 1); kept.push(e); } }
-      beam = kept.slice(0, K * 3);
+      for (const e of next) { const c = per.get(e.key) || 0; if (c < 4 && kept.length < K) { per.set(e.key, c + 1); kept.push(e); } }
+      beam = kept;
     }
-    if (!hit.length) return { stuck: true, p0 };
+    if (!hit.length) return fallback();
     hit.sort((x, y) => x.steps - y.steps || y.v.s - x.v.s);
-    const w = hit[0], first = w.v.m, nx1 = S.applyMove(defs, st, first, true);
-    return { move: first, p0, p1: progress(defs, nx1.board, nx1.hands, o, F), steps: w.steps };
+    const w = hit[0];
+    return { move: w.v.m, p0, p1: w.v.p1, steps: w.steps, key: ownKey(w.v.nx.board, o) };
   }
-  const m_p = (m) => (m.p ? '+' : '');
   function explainForm(defs, st, id, m, r) {
     const F = FORMS[id], o = st.turn, mover = m.f >= 0 ? st.board[m.f] : { t: m.t, o, p: false };
     const nx = S.applyMove(defs, st, m, true);
     const slot = r.p1.slots.map((s, i) => ({ s, i })).filter((x) => x.s.t === mover.t).sort((a, b) => a.s.d - b.s.d)[0];
     const tgt = slot ? F.slots[slot.i] : null;
     const L = [];
+    if (r.interrupt) {
+      const why = { check: '王手を受けているため', hang: '駒を取られそうなため', mate: '相手に詰みの狙いがあるため', capture: '大きな駒をタダで取れるため', stall: '形を進める安全な手がいまはないため' }[r.interrupt];
+      L.unshift('陣形づくりを一時中断：' + why + '、まず最善手を指します。');
+    }
     L.push('目標：' + F.name + '（' + F.slots.map(slotText).join('・') + '）。いま ' + r.p0.filled + '/' + r.p0.total + ' → この手で ' + r.p1.filled + '/' + r.p1.total + ' 箇所が完成します。');
     L.push('この手：' + (m.f >= 0 ? sq(m.f) + 'の' : '') + nameOf(defs, mover) + (m.f >= 0 ? 'を' + sq(m.to) + 'へ。' : 'を' + sq(m.to) + 'に打ちます。') + (tgt ? slotText(tgt) + 'の持ち場へ近づきます（あと' + r.p1.slots[slot.i].d + '手ぶん）。' : ''));
     L.push('安全確認：' + (r.steps ? 'この調子で、あと約' + r.steps + '手で完成する見込みです。' : '') + 'この手で駒損や詰みの筋が出ないことは、数手先まで読んで確かめています。');
-    return L;
+    return L.slice(0, 4);
   }
-  return { FORMS, sq, describe, explain, formStatus, nextFormMove, explainForm, slotText, threatsOn, pressure, progress };
+  return { FORMS, ownKey, sq, describe, explain, formStatus, nextFormMove, explainForm, slotText, threatsOn, pressure, progress };
 })();
 
 
@@ -2237,7 +2268,7 @@ const ShogiPlan = (() => {
   const cancelAi = (g) => { if (g.ai && g.ai.timer) clearTimeout(g.ai.timer); g.ai = null; };
   function releaseHold(g, msg) { g.hold = null; g.holdMsg = msg || ''; cancelAi(g); render(); }
   function activateHold(g, mode, formId) {
-    g.hold = { mode, side: sideNow(g), formId: formId || null }; g.holdMsg = '';
+    g.hold = { mode, side: sideNow(g), formId: formId || null }; g.holdMsg = ''; g.formSeen = new Set(); g.formStall = 0;
     if (g.ai && g.ai.state !== 'thinking') cancelAi(g);
     render();
   }
@@ -2257,7 +2288,10 @@ const ShogiPlan = (() => {
       if (app.game !== g || g.ai !== tok || !g.st) return;
       if (mode === 'form') {
         const fid = g.hold && g.hold.formId, F = ShogiPlan.FORMS[fid];
-        const r = planSafe(() => ShogiPlan.nextFormMove(g.defs, g.st, fid, 700), null);
+        if (!g.formSeen) g.formSeen = new Set();
+        const r = planSafe(() => ShogiPlan.nextFormMove(g.defs, g.st, fid, 700, g.formSeen), null);
+        if (r && r.key) g.formSeen.add(r.key);
+        if (r && !r.done) { g.formStall = r.fallback ? (g.formStall || 0) + 1 : 0; if (g.formStall >= 3) return releaseHold(g, '「' + F.name + '」へは、数手のあいだ安全に進められませんでした（相手の攻めや駒の配置のため）。陣形づくりを解除しました。'); }
         if (app.game !== g || g.ai !== tok) return;
         if (r && r.done) return releaseHold(g, '「' + F.name + '」が完成しました。陣形づくりを自動で解除しました。');
         if (!r || r.stuck || !r.move) return releaseHold(g, '「' + F.name + '」へは、これ以上安全に進められません（相手の攻めや駒の配置のため）。陣形づくりを解除しました。');
