@@ -4,41 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>創作駒将棋</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Yuji+Syuku&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<script>window.SKS_VERSION={v:"2.0.0",d:"2026.10.16"};</script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Shippori+Mincho+B1:wght@600;800&family=Yuji+Syuku&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
 <style>
-:root{color-scheme:light;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+:root{color-scheme:dark;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
 body{margin:0}
 img{max-width:100%}
 [hidden]{display:none!important}
 /* 構成: 盤を主役にした一枚もの。画面の地は墨と藍の冷たい色、木の色は盤と駒だけに使う。 */
 :root{
-  --bg:#e6eae7; --surface:#f5f7f4; --ink:#1b2421; --muted:#55625c; --line:#c2cac4;
-  --accent:#1d4f6e; --on-accent:#f2f7fa; --accent-soft:#d3e1e8;
-  --board:#dcb466; --board-line:#4d3310; --board-edge:#b68b3c;
-  --piece-a:#f7e5b2; --piece-b:#e2be76; --piece-ink:#1a1206; --piece-shadow:rgba(40,25,5,.5);
-  --promo:#b0231a; --mark:rgba(29,79,110,.28); --sel:rgba(29,79,110,.46); --dot:rgba(18,44,60,.6); --chk:rgba(176,35,26,.42);
-  --danger:#a3271c; --note-bg:#efe2c2; --note-ink:#55390a; --ok-bg:#d6e8dc; --ok-ink:#1d4a2c; --off:rgba(40,25,5,.22);
+  /* 和サイバー：墨藍の夜に、藤色の光と生成りの線。差し色は蘇芳 */
+  --bg:#0e0f23; --bg2:#15173a; --surface:#1a1c42; --ink:#ebe6d3; --muted:#a2a4d2; --line:#383c7c;
+  --accent:#a9a4ff; --on-accent:#0f1030; --accent-soft:#2b2e6a;
+  --fuji:#a9a4ff; --kinari:#d8d1ae; --suou:#c8475f; --seiji:#7be0d8;
+  --board:#c9a35b; --board-line:#3b2708; --board-edge:#6e5124;
+  --piece-a:#f7e5b2; --piece-b:#e2be76; --piece-ink:#1a1206; --piece-shadow:rgba(10,5,30,.6);
+  --promo:#b0231a; --mark:rgba(86,74,200,.30); --sel:rgba(86,74,200,.52); --dot:rgba(48,36,128,.66); --chk:rgba(200,50,70,.46);
+  --danger:#ff8196; --note-bg:#2c2347; --note-ink:#eadba8; --ok-bg:#16383a; --ok-ink:#a4ece0; --off:rgba(0,0,0,.34);
   --f-piece:"Yuji Syuku","Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif;
+  --f-head:"Shippori Mincho B1","Yuji Syuku","Hiragino Mincho ProN","Yu Mincho",serif;
+  --f-dot:"DotGothic16","Zen Kaku Gothic New",monospace;
   --f-ui:"Zen Kaku Gothic New","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
-}
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){
-    --bg:#12181a; --surface:#1b2326; --ink:#e3e9e6; --muted:#94a29c; --line:#313d40;
-    --accent:#86bfdf; --on-accent:#0b1920; --accent-soft:#213842;
-    --board:#b38c44; --board-line:#2a1a05; --board-edge:#7a5c25;
-    --piece-a:#ecd59c; --piece-b:#cdab64; --piece-ink:#1a1206; --piece-shadow:rgba(0,0,0,.65);
-    --promo:#a01c13; --mark:rgba(16,52,76,.34); --sel:rgba(16,52,76,.55); --dot:rgba(10,30,44,.66); --chk:rgba(160,28,19,.5);
-    --danger:#e58478; --note-bg:#3a3016; --note-ink:#ecdaa8; --ok-bg:#1e3526; --ok-ink:#b5dcc0; --off:rgba(0,0,0,.34);
-    color-scheme:dark;
-  }
-}
-:root[data-theme="dark"]{
-  --bg:#12181a; --surface:#1b2326; --ink:#e3e9e6; --muted:#94a29c; --line:#313d40;
-  --accent:#86bfdf; --on-accent:#0b1920; --accent-soft:#213842;
-  --board:#b38c44; --board-line:#2a1a05; --board-edge:#7a5c25;
-  --piece-a:#ecd59c; --piece-b:#cdab64; --piece-ink:#1a1206; --piece-shadow:rgba(0,0,0,.65);
-  --promo:#a01c13; --mark:rgba(16,52,76,.34); --sel:rgba(16,52,76,.55); --dot:rgba(10,30,44,.66); --chk:rgba(160,28,19,.5);
-  --danger:#e58478; --note-bg:#3a3016; --note-ink:#ecdaa8; --ok-bg:#1e3526; --ok-ink:#b5dcc0; --off:rgba(0,0,0,.34);
   color-scheme:dark;
 }
 *,*::before,*::after{box-sizing:border-box}
@@ -47,7 +33,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--f-ui);font-size:15p
 h1,h2,h3,p{margin:0}
 h1,h2,h3{text-wrap:balance;line-height:1.3}
 button,input,select{font:inherit;color:inherit}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+:focus-visible{outline:2px solid var(--seiji);outline-offset:2px}
 .screen{display:flex;flex-direction:column;gap:20px}
 .muted{color:var(--muted)}
 .small{font-size:.86rem}
@@ -288,6 +274,110 @@ details.ref summary{padding:8px 12px;cursor:pointer;font-weight:500}
 .ai-form{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--line)}
 .ai-form select{margin-left:.6em;min-height:2.4rem;padding:2px 8px;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:4px}
 @media (prefers-reduced-motion:reduce){.ai-btn .gauge{animation-duration:3000ms!important}}
+
+
+/* ================= 和サイバー ================= */
+html{background:var(--bg)}
+body{position:relative;min-height:100vh;background:
+  radial-gradient(56rem 38rem at 6% -8%,rgba(120,110,255,.24),transparent 62%),
+  radial-gradient(48rem 34rem at 104% 108%,rgba(200,71,95,.20),transparent 62%),
+  linear-gradient(180deg,var(--bg),var(--bg2) 120%)}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background-image:url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22 viewBox=%220 0 48 48%22 fill=%22none%22 stroke=%22%238f8be6%22 stroke-width=%221.2%22 stroke-linecap=%22square%22%3E%3Cpath d=%22M24 0V24H48M0 24H24V48M0 0H12V12M48 48H36V36M12 12V0M36 36V48%22/%3E%3Cpath d=%22M12 36H0M48 12H36V0M24 24H12V12M24 24H36V36%22 opacity=%22.55%22/%3E%3C/svg%3E");background-size:48px 48px;opacity:.16;
+  -webkit-mask-image:linear-gradient(115deg,#000 0,transparent 46%,transparent 62%,#000 100%);mask-image:linear-gradient(115deg,#000 0,transparent 46%,transparent 62%,#000 100%)}
+body::after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1200 800%22 preserveAspectRatio=%22xMidYMid slice%22%3E%3Cg fill=%22%23a9a4ff%22%3E%3Cpath opacity=%22.10%22 d=%22M600 120C720 60 820 150 940 110S1120 60 1260 120V210C1120 170 1040 250 920 220S720 170 600 230Z%22/%3E%3Cpath opacity=%22.07%22 d=%22M700 250C800 220 880 280 980 250S1140 220 1260 260V320C1140 290 1060 350 960 330S780 300 700 340Z%22/%3E%3Cpath opacity=%22.09%22 d=%22M-60 560C60 520 160 610 280 570S470 520 560 580V670C470 620 400 700 280 680S80 640-60 690Z%22/%3E%3Cpath opacity=%22.06%22 d=%22M-60 700C80 670 180 740 300 710S450 690 520 730V790H-60Z%22/%3E%3C/g%3E%3Cg fill=%22%23d8d1ae%22 opacity=%22.42%22%3E%3Crect x=%2284%22 y=%22150%22 width=%227%22 height=%227%22/%3E%3Crect x=%22132%22 y=%2296%22 width=%225%22 height=%225%22/%3E%3Crect x=%221040%22 y=%22420%22 width=%227%22 height=%227%22/%3E%3Crect x=%22990%22 y=%22470%22 width=%225%22 height=%225%22/%3E%3Crect x=%221110%22 y=%22540%22 width=%226%22 height=%226%22/%3E%3Crect x=%22300%22 y=%22420%22 width=%225%22 height=%225%22/%3E%3Crect x=%22520%22 y=%2260%22 width=%226%22 height=%226%22/%3E%3C/g%3E%3C/svg%3E") center/cover no-repeat}
+#app{position:relative;z-index:1}
+h1,h2,h3{font-family:var(--f-head);font-weight:700}
+
+/* 角の括弧（枠の四隅のうち二箇所に、生成りの線を引く） */
+.mode,.bar-card,.panel,.ai,.formbox{position:relative}
+.mode::before,.mode::after,.ai::before,.ai::after,.formbox::before,.formbox::after{content:"";position:absolute;width:14px;height:14px;pointer-events:none;border:0 solid var(--kinari);opacity:.75}
+.mode::before,.ai::before,.formbox::before{top:-1px;left:-1px;border-width:2px 0 0 2px}
+.mode::after,.ai::after,.formbox::after{right:-1px;bottom:-1px;border-width:0 2px 2px 0}
+
+/* ボタン */
+.btn{border-radius:3px;border-color:#cfcbff;background:linear-gradient(180deg,#bdb9ff,#8f8af0);color:var(--on-accent);box-shadow:0 0 0 1px rgba(169,164,255,.28),0 0 16px rgba(169,164,255,.32);transition:box-shadow .15s,transform .15s}
+.btn:hover{filter:none;box-shadow:0 0 0 1px rgba(207,203,255,.6),0 0 26px rgba(169,164,255,.55)}
+.btn:active{transform:translateY(1px)}
+.btn.ghost{background:rgba(169,164,255,.07);color:var(--fuji);border-color:rgba(169,164,255,.7);box-shadow:0 0 12px rgba(169,164,255,.14)}
+.btn.quiet{background:transparent;color:var(--ink);border-color:var(--line);box-shadow:none}
+.btn.quiet:hover{border-color:var(--fuji)}
+.btn.danger{background:transparent;color:var(--danger);border-color:var(--suou);box-shadow:none}
+.btn:disabled{box-shadow:none}
+input[type="text"],select{background:rgba(8,9,28,.62);border-color:var(--line);color:var(--ink);border-radius:3px}
+input[type="text"]:focus,select:focus{outline:0;border-color:var(--seiji);box-shadow:0 0 0 3px rgba(123,224,216,.22)}
+input.code{font-family:var(--f-dot);font-weight:400;color:var(--seiji);text-shadow:0 0 12px rgba(123,224,216,.5)}
+.seg{border-color:var(--line);border-radius:3px;background:rgba(8,9,28,.5)}
+.seg button{background:transparent;border-right-color:var(--line);color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--fuji);color:var(--on-accent)}
+.note{border-left:3px solid var(--kinari)}
+.tag{font-family:var(--f-dot);border-color:var(--line);color:var(--kinari)}
+
+/* メニュー */
+.masthead{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:18px 28px;padding:6px 0 22px;border-bottom:1px solid var(--line);position:relative}
+.masthead::after{content:"";position:absolute;left:0;bottom:-1px;width:min(18rem,46%);height:2px;background:linear-gradient(90deg,var(--fuji),transparent);box-shadow:0 0 12px var(--fuji)}
+.mast-main{display:flex;align-items:center;gap:clamp(14px,3vw,26px);min-width:0}
+.emblem{flex:none;width:clamp(4.6rem,15vw,6.8rem);filter:drop-shadow(0 0 14px rgba(169,164,255,.5))}
+.emblem svg{display:block;width:100%;height:auto}
+.emblem .e-out{fill:rgba(26,28,66,.7);stroke:var(--kinari);stroke-width:2.2}
+.emblem .e-in{fill:none;stroke:var(--fuji);stroke-width:1.4}
+.emblem .e-ch{fill:var(--ink);font-family:var(--f-head);font-weight:800;font-size:46px}
+.emblem .e-d{stroke:none}
+.mast-text{min-width:0}
+.masthead h1{font-family:var(--f-head);font-weight:800;font-size:clamp(2.3rem,9vw,4.4rem);letter-spacing:.18em;line-height:1.08;color:var(--ink);text-shadow:0 0 22px rgba(169,164,255,.55),0 0 2px rgba(169,164,255,.9);margin-right:-.18em}
+.masthead p{color:var(--muted);max-width:30em;margin-top:6px}
+.ver{display:inline-flex;align-items:center;gap:10px;margin-top:10px;padding:3px 12px 3px 10px;border:1px solid var(--line);border-radius:2px;background:rgba(8,9,28,.55);font-family:var(--f-dot);font-size:.9rem;letter-spacing:.08em;color:var(--kinari)}
+.ver i{width:6px;height:6px;border-radius:50%;background:var(--suou);box-shadow:10px 0 0 var(--fuji),20px 0 0 var(--kinari);margin-right:22px}
+.ver b{font-weight:400;color:var(--seiji);text-shadow:0 0 10px rgba(123,224,216,.5)}
+.strip{padding:10px 12px;border:1px solid var(--line);border-radius:3px;background:rgba(8,9,28,.5)}
+@media (max-width:640px){.masthead{grid-template-columns:minmax(0,1fr)} .strip{justify-self:start}}
+.modes{gap:18px}
+.mode{background:linear-gradient(160deg,rgba(43,46,106,.78),rgba(22,24,58,.9));border:1px solid var(--line);border-top:1px solid var(--line);padding:22px 20px;box-shadow:0 14px 40px rgba(0,0,0,.35)}
+.mode h2{font-size:1.35rem;letter-spacing:.08em}
+.mode p{color:var(--muted)}
+.bar{border-top:1px solid var(--line);position:relative}
+.bar h2{letter-spacing:.06em}
+.vfoot{margin-top:8px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:.86rem}
+.vfoot summary{cursor:pointer;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;list-style:none}
+.vfoot summary::-webkit-details-marker{display:none}
+.vfoot summary::after{content:"更新の履歴を見る";margin-left:auto;color:var(--fuji)}
+.vfoot[open] summary::after{content:"閉じる"}
+.vfoot .v{font-family:var(--f-dot);color:var(--seiji);letter-spacing:.08em}
+.vlog{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:10px;max-width:44rem}
+.vlog li{display:grid;grid-template-columns:5.6rem minmax(0,1fr);gap:4px 14px}
+.vlog time{font-family:var(--f-dot);color:var(--kinari)}
+
+/* 対局 */
+.board{border-color:var(--board-line);box-shadow:0 0 0 5px var(--board-edge),0 0 0 6px rgba(216,209,174,.55),0 0 46px rgba(120,110,255,.30),0 14px 34px rgba(0,0,0,.55)}
+.files,.ranks{font-family:var(--f-dot);color:var(--kinari);opacity:.8}
+.hand{background:linear-gradient(90deg,rgba(43,46,106,.7),rgba(22,24,58,.7));border-color:var(--line);border-radius:2px}
+.hand.turn{border-color:var(--fuji);box-shadow:inset 3px 0 0 var(--fuji),0 0 16px rgba(169,164,255,.22)}
+.ghead{border-bottom-color:var(--line)}
+.status{font-family:var(--f-head);font-weight:700;letter-spacing:.04em}
+.panel{background:rgba(26,28,66,.72);border-color:var(--line);border-radius:2px}
+.log{font-variant-numeric:tabular-nums}
+.ai{background:linear-gradient(160deg,rgba(43,46,106,.7),rgba(20,22,52,.85));border-color:var(--line);padding:14px}
+.ai-h{font-family:var(--f-head);color:var(--kinari);letter-spacing:.12em;font-size:.92rem}
+.ai-btn{border-radius:3px;background:rgba(8,9,28,.5)}
+.ai-btn.atk{border-color:var(--suou);color:var(--danger)}
+.ai-btn.def{border-color:var(--fuji);color:var(--fuji)}
+.ai-btn.form{border-color:var(--seiji);color:var(--seiji)}
+.ai-btn b{color:var(--ink)}
+.ai-btn .k{font-family:var(--f-head);text-shadow:0 0 14px currentColor}
+.ai-btn.armed{background:rgba(169,164,255,.14)}
+.ai-btn.hold{background:rgba(169,164,255,.16)}
+.ai-move{font-family:var(--f-head);color:var(--ink)}
+.ai-pop{background:#16183b;border-color:var(--fuji);box-shadow:0 0 24px rgba(169,164,255,.35),0 10px 30px rgba(0,0,0,.5)}
+.ai-hold{color:var(--seiji)}
+.warn{border-left:3px solid var(--suou)}
+
+/* 起動時の一度だけの動き：紋の輪郭が引かれる */
+@media (prefers-reduced-motion:no-preference){
+  .emblem .e-out,.emblem .e-in{stroke-dasharray:420;stroke-dashoffset:420;animation:draw 1.5s cubic-bezier(.3,.7,.2,1) .15s forwards}
+  .emblem .e-in{animation-delay:.55s}
+  .emblem .e-ch,.emblem .e-d{opacity:0;animation:fadein .6s ease 1.1s forwards}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  @keyframes fadein{to{opacity:1}}
+}
 
 </style>
 </head>
@@ -1483,6 +1573,22 @@ const ShogiPlan = (() => {
     if (!app.caps.room || app.caps.denied) return 'この表示ではオンライン対戦に接続できません。サインインして、このページを共有された相手として開いてください。';
     return '';
   }
+  const VER = window.SKS_VERSION || { v: '2.0.0', d: '' };
+  const CHANGES = [
+    ['v2.0.0', '見た目を「和サイバー」に一新。メニューにバージョン表示を追加。'],
+    ['v1.9', 'ひとりで指すモード（コンピュータ戦）。ホールド中は盤に触れても解除されません。'],
+    ['v1.8', '陣形づくりAI。攻め・守りのAIにも、狙いを説明するポップアップを追加。'],
+    ['v1.0', 'オンライン対戦・オリジナル駒ルール・コスト制限・対局前の配置。'],
+  ];
+  function emblem() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const wrap = h('div', { class: 'emblem', 'aria-hidden': 'true' });
+    wrap.innerHTML = '<svg viewBox="0 0 100 100"><circle class="e-out" cx="50" cy="50" r="46"/><circle class="e-in" cx="50" cy="50" r="38"/>'
+      + '<path class="e-in" d="M50 4V12M50 88V96M4 50H12M88 50H96"/>'
+      + '<text class="e-ch" x="50" y="66" text-anchor="middle">駒</text>'
+      + '<g class="e-d"><rect x="14" y="20" width="4" height="4" fill="#c8475f"/><rect x="80" y="76" width="4" height="4" fill="#a9a4ff"/><rect x="82" y="22" width="3" height="3" fill="#d8d1ae"/></g></svg>';
+    return wrap;
+  }
   function vMenu() {
     const defs = libDefs();
     const stripIds = ['K', 'R'].concat(app.lib.pieces.slice(0, 2).map((p) => p.id), ['B']);
@@ -1496,7 +1602,9 @@ const ShogiPlan = (() => {
     });
     return h('div', { class: 'screen' },
       h('header', { class: 'masthead' },
-        h('div', null, h('h1', null, '創作駒将棋'), h('p', null, '部屋を立てて、同じページを開いている相手と指す将棋。自分で考えた駒を盤に並べて対局できます。')),
+        h('div', { class: 'mast-main' }, emblem(),
+          h('div', { class: 'mast-text' }, h('h1', null, '創作駒将棋'), h('p', null, '部屋を立てて、同じページを開いている相手と指す将棋。自分で考えた駒を盤に並べて対局できます。'),
+            h('div', { class: 'ver', title: 'バージョン' }, h('i'), h('b', null, 'v' + VER.v), VER.d))),
         h('div', { class: 'strip', 'aria-hidden': 'true' }, stripIds.map((id) => pcBox(defs[id], { o: 0, p: false })))),
       app.pendingResume ? h('p', { class: 'note' }, '前回の対局に戻っています…') : null,
       blocked ? h('p', { class: 'note' }, blocked + ' 「この端末で2人で指す」は使えます。') : null,
@@ -1520,7 +1628,10 @@ const ShogiPlan = (() => {
           h('button', { class: 'btn quiet', type: 'button', onclick: () => { LS.del('sks.resume'); render(); } }, '消す'))) : null,
       h('section', { class: 'bar' },
         h('div', null, h('h2', null, 'オリジナル駒の作成'), h('p', { class: 'muted small' }, '保存してある駒：' + app.lib.pieces.length + '種')),
-        h('button', { class: 'btn ghost', type: 'button', onclick: () => { app.piecesBack = 'menu'; app.delAsk = null; go('pieces'); } }, '駒をつくる・直す')));
+        h('button', { class: 'btn ghost', type: 'button', onclick: () => { app.piecesBack = 'menu'; app.delAsk = null; go('pieces'); } }, '駒をつくる・直す')),
+      h('details', { class: 'vfoot' },
+        h('summary', null, h('span', null, '創作駒将棋'), h('span', { class: 'v' }, 'v' + VER.v), h('span', null, VER.d + ' 版')),
+        h('ul', { class: 'vlog' }, CHANGES.map((c) => h('li', null, h('time', null, c[0]), h('span', null, c[1]))))));
   }
   function doJoin() {
     const code = app.joinCode;
