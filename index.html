@@ -269,14 +269,21 @@ details.ref summary{padding:8px 12px;cursor:pointer;font-weight:500}
 .ai-tip p+p{margin-top:.35em}
 .ai-tipwrap:hover .ai-tip,.ai-tipwrap:focus-within .ai-tip{display:block}
 
+/* 攻め・守りボタンの説明（ボタンの上に出す） */
+.ai-btn{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+.ai-btn.armed{background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent)}
+.ai-pop{position:fixed;z-index:50;display:none;width:min(26rem,calc(100vw - 16px));padding:10px 12px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:4px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:.88rem;line-height:1.5;pointer-events:none}
+.ai-pop.on{display:block}
+.ai-pop p+p{margin-top:.35em}
+
 </style>
 </head>
 <body>
 <div id="app"></div>
 <script>window.SKS_STANDALONE = true;</script>
 <!-- 対戦相手との接続に PeerJS (MIT License, https://peerjs.com) を使います -->
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script>window.Peer || document.write('<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"><\/script>');</script>
+<script crossorigin="anonymous" src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>window.Peer || document.write('<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"><\/script>');</script>
 <script>
 /* 将棋ルールエンジン。通常駒もオリジナル駒も同じ「走り8方向＋跳び」の型で表す。 */
 const Shogi = (() => {
@@ -1950,7 +1957,7 @@ const ShogiExt = (() => {
     setTimeout(async () => {
       if (app.game !== g || g.ai !== tok || !g.st) return;
       const hasExt = g.mode !== 'orig' && typeof ShogiExt !== 'undefined';
-      if (hasExt && ShogiExt.status() === 'loading') { try { await ShogiExt.wait(20000); } catch (e) { /* 内蔵AIで続ける */ } }
+      if (hasExt && ShogiExt.status() === 'loading') { try { await ShogiExt.wait(45000); } catch (e) { /* 内蔵AIで続ける */ } }
       if (app.game !== g || g.ai !== tok) return;
       const useExt = hasExt && ShogiExt.ready();
       let r = null, src = 'int', tipInfo = null;
@@ -1965,7 +1972,7 @@ const ShogiExt = (() => {
       if (app.game !== g || g.ai !== tok) return;
       const legal = legalFor(g), m = r && r.move ? S.findMove(legal, r.move) : null;
       if (!m) Object.assign(tok, { state: 'none' });
-      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, tip: src === 'ext' ? aiTipSafe(g, mode, m, tipInfo) : null, miss: hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンを読み込み中です' : '') : '', why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
+      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, tip: src === 'ext' ? aiTipSafe(g, mode, m, tipInfo) : null, miss: hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンの読み込みが終わっていません（少し待ってからもう一度押してください）' : '') : '', why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
       render();
     }, 60);
   }
@@ -2008,32 +2015,63 @@ const ShogiExt = (() => {
   }
   function aiPanel(g, act) {
     const ai = g.ai, busy = !!ai && ai.state === 'thinking';
-    const btn = (mode, ch, sub) => h('button', {
-      class: 'ai-btn ' + mode, type: 'button', disabled: !act || busy, 'aria-pressed': String(!!ai && ai.mode === mode),
-      onclick: () => startAi(g, mode),
-    }, h('span', { class: 'k', 'aria-hidden': 'true' }, ch), h('span', null, h('b', null, mode === 'atk' ? '攻め' : '守り'), h('small', null, sub)));
+    const pop = h('div', { class: 'ai-pop', role: 'tooltip', id: 'ai-pop' });
+    const hidePop = () => pop.classList.remove('on');
+    const showPop = (btn, lines) => {
+      pop.replaceChildren(...lines.map((t) => h('p', null, t)));
+      pop.classList.add('on');
+      const r = btn.getBoundingClientRect(), w = pop.offsetWidth, ph = pop.offsetHeight;
+      pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+      // 指やカーソルの邪魔にならないよう、ボタンの上に出す（入りきらなければ下）
+      pop.style.top = (r.top - ph - 10 >= 8 ? r.top - ph - 10 : Math.min(r.bottom + 10, window.innerHeight - ph - 8)) + 'px';
+    };
+    const btn = (mode, ch, sub) => {
+      const mine = !!ai && ai.mode === mode && ai.state === 'ready';
+      const lines = mine ? (ai.tip || (ai.why ? [ai.why] : null)) : null;
+      let timer = 0, held = false;
+      const el = h('button', {
+        class: 'ai-btn ' + mode + (mine ? ' armed' : ''), type: 'button', disabled: !act || busy, 'aria-pressed': String(mine),
+        'aria-describedby': lines ? 'ai-pop' : null,
+        onclick: () => { if (held) { held = false; return; } if (mine) aiRun(g); else startAi(g, mode); },
+        oncontextmenu: (e) => e.preventDefault(),
+      }, h('span', { class: 'k', 'aria-hidden': 'true' }, ch),
+      h('span', null, h('b', null, mode === 'atk' ? '攻め' : '守り'), h('small', null, mine ? 'もう一度押すと、この手を指します' : sub)));
+      if (lines) {
+        // PC：カーソルが載っている間／スマホ：指で押さえている間だけ、説明を出す
+        el.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') showPop(el, lines); });
+        el.addEventListener('pointerleave', hidePop);
+        el.addEventListener('focus', () => showPop(el, lines));
+        el.addEventListener('blur', hidePop);
+        el.addEventListener('pointerdown', (e) => {
+          if (e.pointerType === 'mouse') return;
+          held = false; clearTimeout(timer);
+          timer = setTimeout(() => { held = true; showPop(el, lines); }, 350);
+        });
+        const end = () => { clearTimeout(timer); hidePop(); if (held) setTimeout(() => { held = false; }, 400); };
+        el.addEventListener('pointerup', end);
+        el.addEventListener('pointercancel', end);
+      }
+      return el;
+    };
     let body = null;
-    if (busy) body = h('p', { class: 'ai-msg', role: 'status' }, '考えています…');
+    if (busy) body = h('p', { class: 'ai-msg', role: 'status' }, ShogiExtLoading() ? 'エンジンを読み込んでいます（初回は少し時間がかかります）…' : '考えています…');
     else if (ai && ai.state === 'none') body = h('p', { class: 'ai-msg' }, '指せる手が見つかりませんでした。');
     else if (ai && ai.state === 'ready') body = h('div', { class: 'ai-pre' },
-      h('p', { class: 'tag-line' }, (ai.mode === 'atk' ? '攻め' : '守り') + 'の予告手' + (ai.kind === 'mate' ? '（詰み筋）' : '')),
-      ai.tip ? h('div', { class: 'ai-tipwrap' },
-        h('p', { class: 'ai-move has-tip', tabindex: '0', 'aria-describedby': 'ai-tip' }, ai.text, h('span', { class: 'tip-hint', 'aria-hidden': 'true' }, ' ⓘ')),
-        h('div', { class: 'ai-tip', id: 'ai-tip', role: 'tooltip' }, ai.tip.map((t) => h('p', null, t)))) : h('p', { class: 'ai-move' }, ai.text),
+      h('p', { class: 'tag-line' }, (ai.mode === 'atk' ? '攻め' : '守り') + 'の予告手' + (ai.kind === 'mate' ? '（詰み筋）' : '') + '：もう一度同じボタンを押すと指します'),
+      h('p', { class: 'ai-move' }, ai.text),
       h('p', { class: 'muted small' }, ai.why),
-      h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI')),
+      h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI') + (ai.tip ? '　／　ボタンを押さえる（PCはカーソルを載せる）と説明が出ます' : '')),
       ai.src !== 'ext' && ai.miss ? h('p', { class: 'muted small' }, 'エンジンを使えない理由：' + ai.miss) : null,
       h('p', { class: 'muted small' }, '盤の枠でかこんだ升が、動かす駒と行き先です。'),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn', type: 'button', onclick: () => aiRun(g) }, 'この手を指す'),
-        h('button', { class: 'btn quiet', type: 'button', onclick: () => { g.ai = null; render(); } }, 'やめる')));
+      h('div', { class: 'row' }, h('button', { class: 'btn quiet', type: 'button', onclick: () => { g.ai = null; render(); } }, 'やめる')));
 
     return h('div', { class: 'ai' },
       h('p', { class: 'ai-h' }, 'AIに一手きく'),
       h('div', { class: 'ai-btns' }, btn('atk', '攻', '王を詰ませにいく手'), btn('def', '守', '王を守り、攻めを止める手')),
       !ai && !act ? h('p', { class: 'muted small' }, '自分の番のときに使えます。') : null,
-      body);
+      body, pop);
   }
+  const ShogiExtLoading = () => typeof ShogiExt !== 'undefined' && ShogiExt.status() === 'loading';
   function onCell(g, idx) {
     if (!canAct(g)) return;
     const st = g.st;

@@ -8,7 +8,7 @@ self.addEventListener('fetch', (e) => {
   e.respondWith(fetch(r).then((res) => {
     if (res.status === 0) return res;
     const h = new Headers(res.headers);
-    h.set('Cross-Origin-Embedder-Policy', 'credentialless');
+    h.set('Cross-Origin-Embedder-Policy', 'require-corp');
     h.set('Cross-Origin-Opener-Policy', 'same-origin');
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
   }).catch(() => fetch(r)));
