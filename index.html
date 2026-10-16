@@ -1523,13 +1523,16 @@ const ShogiPlan = (() => {
         c.err ? h('p', { class: 'err', role: 'alert' }, c.err) : null,
         h('div', { class: 'row' },
           h('button', { class: 'btn', type: 'button', onclick: () => startFromCreate('online') }, '部屋を立てる'),
-          h('button', { class: 'btn ghost', type: 'button', onclick: () => startFromCreate('local') }, 'この端末で2人で指す'))));
+          h('button', { class: 'btn ghost', type: 'button', onclick: () => startFromCreate('local') }, 'この端末で2人で指す'),
+          h('button', { class: 'btn ghost', type: 'button', onclick: () => startFromCreate('solo') }, 'ひとりで指す（コンピュータ戦・仕様確認用）')),
+        orig ? h('p', { class: 'muted small' }, 'ひとり用でも、先手と後手の駒の並びを自分で作れます。後手の手は、このゲームのルールで読むコンピュータが指します。') : null));
   }
   function startFromCreate(kind) {
     const c = app.create, orig = c.mode === 'orig';
-    if (kind === 'local') {
-      if (orig) startLocalSetup();
-      else startLocal({ v: 1, rid: rid(6), mode: 'std', ps: [], b: S.encBoard(S.stdBoard()) }, null);
+    if (kind === 'local' || kind === 'solo') {
+      const solo = kind === 'solo';
+      if (orig) startLocalSetup(solo);
+      else startLocal({ v: 1, rid: rid(6), mode: 'std', ps: [], b: S.encBoard(S.stdBoard()) }, null, solo);
       return;
     }
     if (!/^\d{4}$/.test(c.code)) { c.err = 'パスワードは数字4桁で入れてください。'; render(); return; }
@@ -1776,15 +1779,16 @@ const ShogiPlan = (() => {
   const baseGame = (kind) => ({ kind, ai: null, hold: null, holdMsg: '', formUi: false, formSel: 'mino', cfg: null, mode: 'std', ph: 'play', customs: [], defs: S.makeDefs([]), st: null, legal: null, sel: null, ask: null, log: [], confirm: null });
   const legalFor = (g) => g.legal || (g.legal = g.st.res ? [] : S.legalMoves(g.defs, g.st));
   const mySide = (g) => {
+    if (g.kind === 'local' && g.solo) return 0; // ひとり用：あなたは先手
     if (g.kind !== 'online') return null;
     const hs = g.ph === 'setup' ? g.hs : g.st ? g.st.hs : 0;
     return g.role === 'h' ? hs : g.seated ? 1 - hs : null;
   };
-  const canAct = (g) => !!g.st && !g.st.res && !g.ask && (g.kind === 'local' || mySide(g) === g.st.turn);
+  const canAct = (g) => !!g.st && !g.st.res && !g.ask && (g.kind === 'local' ? !(g.solo && g.st.turn === 1) : mySide(g) === g.st.turn);
   const cleanLog = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string').map((x) => x.slice(0, 16)).slice(-400) : []);
 
   function persist(g) {
-    if (g.kind === 'local') { if (g.cfg && g.st && g.ph !== 'setup') SS.set('sks.session', { kind: 'local', cfg: g.cfg, st: S.encState(g.st), log: g.log.slice(-400) }); return; }
+    if (g.kind === 'local') { if (g.cfg && g.st && g.ph !== 'setup') SS.set('sks.session', { kind: 'local', solo: !!g.solo, cfg: g.cfg, st: S.encState(g.st), log: g.log.slice(-400) }); return; }
     const base = { kind: 'online', code: g.code, cid: g.cid, role: g.role === 'h' ? 'h' : 'g', gid: g.gid || null, mode: g.mode };
     let data;
     if (g.ph === 'setup') data = Object.assign(base, { ph: 'setup', sr: g.sr, hs: g.hs, gameNo: g.gameNo || 0, cfg: null, st: null, log: [] });
@@ -1833,8 +1837,8 @@ const ShogiPlan = (() => {
     if (errs.length) return { err: /王手/.test(errs[0]) ? 'check' : /指せる手/.test(errs[0]) ? 'nomove' : 'bad' };
     return { cfg: { v: 1, rid: rid(6), mode: 'orig', ps: fps, b: S.encBoard(board) } };
   }
-  function startLocalSetup() {
-    const g = baseGame('local');
+  function startLocalSetup(solo) {
+    const g = baseGame('local'); g.solo = !!solo;
     g.mode = 'orig'; g.gameNo = 0;
     enterSetup(g, 0, 0);
     g.eds = [newEd(), newEd()]; g.edSide = 0;
@@ -1881,8 +1885,8 @@ const ShogiPlan = (() => {
     g.st = initialState(g, g.gameNo, g.hs); g.ph = 'play'; g.setupErr = null; g.army = null;
   }
 
-  function startLocal(cfg, saved) {
-    const g = baseGame('local');
+  function startLocal(cfg, saved, solo) {
+    const g = baseGame('local'); g.solo = !!solo || !!(saved && saved.solo);
     adoptCfg(g, cfg);
     g.st = (saved && saved.st && S.decState(saved.st, g.defs)) || initialState(g, 1, 0);
     if (saved) g.log = cleanLog(saved.log);
@@ -2192,6 +2196,22 @@ const ShogiPlan = (() => {
     g.st = S.applyMove(g.defs, g.st, m);
     afterLocalChange(g);
   }
+  /* ひとり用：後手（コンピュータ）の手 */
+  async function cpuMove(g) {
+    if (app.game !== g || !g.solo || !g.st || g.st.res || g.st.turn !== 1) return;
+    const n = g.st.n, gno = g.st.g;
+    let m = null;
+    try {
+      if (g.mode !== 'orig' && typeof ShogiExt !== 'undefined' && ShogiExt.ready()) {
+        const u = await ShogiExt.ask(g.st, 900);
+        m = u ? S.findMove(legalFor(g), ShogiExt.parseMove(u)) : null;
+      }
+      if (!m) { const r = ShogiAI.suggest(g.defs, g.st, 'atk', { ms: 900 }); m = r && r.move ? S.findMove(legalFor(g), r.move) : null; }
+    } catch (e) { m = null; }
+    if (!m) { const lg = legalFor(g); m = lg.length ? lg[(Math.random() * lg.length) | 0] : null; }
+    if (app.game !== g || g.st.n !== n || g.st.g !== gno || g.st.res || !m) return;
+    doMove(g, m);
+  }
   function resign(g) {
     const loser = g.kind === 'online' ? mySide(g) : g.st.turn;
     if (loser == null || g.st.res) return;
@@ -2330,7 +2350,7 @@ const ShogiPlan = (() => {
     else if (ai && ai.state === 'ready') body = h('div', { class: 'ai-pre' },
       h('p', { class: 'tag-line' }, (ai.mode === 'atk' ? '攻めの予告手' : ai.mode === 'def' ? '守りの予告手' : '陣形づくりの予告手（' + F[hold && hold.formId].name + '・完成 ' + ai.formNote + '）') + (ai.kind === 'mate' ? '（詰み筋）' : '')),
       h('p', { class: 'ai-move' }, ai.text),
-      h('p', { class: 'muted small' }, ai.timed ? '約3秒後に自動で指します。読む時間がほしいときは欄外を押してホールドを解除してください。' : 'もう一度同じボタンを押すと指します。'),
+      h('p', { class: 'muted small' }, ai.timed ? '約3秒後に自動で指します。読む時間がほしいときは、盤以外の欄外を押してホールドを解除してください。' : 'もう一度同じボタンを押すと指します。'),
       ai.tip ? h('ul', { class: 'ai-why' }, ai.tip.map((t) => h('li', null, t))) : (ai.why ? h('p', { class: 'muted small' }, ai.why) : null),
       ai.mode !== 'form' ? h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI')) : null,
       ai.src !== 'ext' && ai.miss ? h('p', { class: 'muted small' }, 'エンジンを使えない理由：' + ai.miss) : null,
@@ -2340,7 +2360,7 @@ const ShogiPlan = (() => {
     if (hold) {
       const fs = hold.mode === 'form' ? ShogiPlan.formStatus(g.defs, g.st.board, g.st.hands, hold.side, hold.formId) : null;
       if (fs && fs.done && !g.doneQ) { g.doneQ = setTimeout(() => { g.doneQ = 0; if (app.game === g && g.hold && g.hold.mode === 'form') releaseHold(g, '「' + F[g.hold.formId].name + '」が完成しました。陣形づくりを自動で解除しました。'); }, 0); }
-      status = h('p', { class: 'ai-hold', role: 'status' }, '● ' + (hold.mode === 'atk' ? '攻めを継続中' : hold.mode === 'def' ? '守りを継続中' : '陣形「' + F[hold.formId].name + '」を組み上げ中（完成 ' + fs.filled + '/' + fs.total + '）') + '　欄外をクリック／タップで解除');
+      status = h('p', { class: 'ai-hold', role: 'status' }, '● ' + (hold.mode === 'atk' ? '攻めを継続中' : hold.mode === 'def' ? '守りを継続中' : '陣形「' + F[hold.formId].name + '」を組み上げ中（完成 ' + fs.filled + '/' + fs.total + '）') + '　盤以外の欄外をクリック／タップで解除');
     }
     // 陣形の選択
     let chooser = null;
@@ -2389,7 +2409,7 @@ const ShogiPlan = (() => {
     const g = app.game;
     if (!g) { app.view = 'menu'; return vMenu(); }
     const online = g.kind === 'online';
-    const title = online ? '部屋 ' + g.code : 'この端末で対局';
+    const title = online ? '部屋 ' + g.code : g.solo ? 'ひとりで対局（コンピュータ戦）' : 'この端末で対局';
     const leaveBtn = g.confirm === 'leave'
       ? h('span', { class: 'row' }, h('button', { class: 'btn danger sm', type: 'button', onclick: leaveGame }, '退出する'), h('button', { class: 'btn quiet sm', type: 'button', onclick: () => { g.confirm = null; render(); } }, 'やめる'))
       : h('button', { class: 'btn quiet sm', type: 'button', onclick: () => { if (g.st && !g.st.res && g.st.n > 0) { g.confirm = 'leave'; render(); } else leaveGame(); } }, online ? '退出' : '終了');
@@ -2471,6 +2491,8 @@ const ShogiPlan = (() => {
       status = h('p', { class: 'status', role: 'status' }, SYM[st.turn] + SIDE[st.turn] + 'の番' + whose, checked ? h('span', { class: 'chk-word' }, '王手') : null);
     }
     const notes = [];
+    if (g.solo && !st.res && st.turn === 1) notes.push('コンピュータが考えています…');
+    if (g.solo && !g.cpuQ && !st.res && st.turn === 1) g.cpuQ = setTimeout(() => { g.cpuQ = 0; cpuMove(g); }, 450);
     if (online) {
       if (g.role === 'h') {
         if (!g.gid) notes.push('相手の入室を待っています。パスワード「' + g.code + '」を相手に伝えてください。');
@@ -2483,7 +2505,7 @@ const ShogiPlan = (() => {
       }
     }
     const buttons = [];
-    if (!st.res && (g.kind === 'local' || me != null)) {
+    if (!st.res && (g.kind === 'local' || me != null) && !(g.solo && st.turn === 1)) {
       if (g.confirm === 'resign') buttons.push(
         h('button', { class: 'btn danger', type: 'button', onclick: () => resign(g) }, g.kind === 'local' ? SIDE[st.turn] + 'が投了する' : '投了する'),
         h('button', { class: 'btn quiet', type: 'button', onclick: () => { g.confirm = null; render(); } }, 'やめる'));
@@ -2557,9 +2579,8 @@ const ShogiPlan = (() => {
   // ホールドの解除：AIボタンやその説明の外側（欄外）を押したとき
   document.addEventListener('pointerdown', (e) => {
     const g = app.game;
-    if (!g || !g.hold || (e.target.closest && e.target.closest('.ai'))) return;
-    // 1台で両方の側を指すときは、相手側の番に盤を押しても解除しない（相手側の手を指すため）
-    if (g.kind === 'local' && g.st && g.st.turn !== g.hold.side) return;
+    // 解除するのは、AIの枠・将棋盤・持ち駒の外側（欄外）を押したときだけ
+    if (!g || !g.hold || (e.target.closest && e.target.closest('.ai, .board, .hand'))) return;
     releaseHold(g, 'ホールドを解除しました。');
   }, true);
   if (STANDALONE) {
