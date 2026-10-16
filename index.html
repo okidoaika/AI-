@@ -276,6 +276,19 @@ details.ref summary{padding:8px 12px;cursor:pointer;font-weight:500}
 .ai-pop.on{display:block}
 .ai-pop p+p{margin-top:.35em}
 
+/* ホールド・ゲージ・陣形 */
+.ai-btn{position:relative;overflow:hidden}
+.ai-btn .gauge{position:absolute;inset:0;background:currentColor;opacity:.16;transform-origin:left;transform:scaleX(0);animation-name:aigauge;animation-timing-function:linear;animation-fill-mode:forwards;pointer-events:none}
+@keyframes aigauge{to{transform:scaleX(1)}}
+.ai-btn.hold{border-style:dashed;background:var(--accent-soft)}
+.ai-btn.form{border-color:var(--ok-ink,var(--accent));color:var(--ok-ink,var(--accent))}
+.ai-hold{font-size:.88rem;font-weight:700;color:var(--accent)}
+.ai-why{margin:.2em 0 0;padding-left:1.2em;font-size:.9rem;line-height:1.55}
+.ai-why li+li{margin-top:.3em}
+.ai-form{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--line)}
+.ai-form select{margin-left:.6em;min-height:2.4rem;padding:2px 8px;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:4px}
+@media (prefers-reduced-motion:reduce){.ai-btn .gauge{animation-duration:3000ms!important}}
+
 </style>
 </head>
 <body>
@@ -829,7 +842,7 @@ const ShogiAI = (() => {
     let all = S.legalMoves(defs, st);
     if (mode === 'atk' && !S.inCheck(defs, st.board, st.turn)) {
       // 攻めのときは、王手を受けている場合を除いて、玉を動かす手を選ばない
-      const nk = all.filter((m) => !(m.f >= 0 && st.board[m.f] && defs[st.board[m.f].t] && defs[st.board[m.f].t].king));
+      const nk = all.filter((m) => !(m.f >= 0 && st.board[m.f] && defs[st.board[m.f].t] && defs[st.board[m.f].t].royal));
       if (nk.length) all = nk;
     }
     let order = orderMoves(defs, st, all);
@@ -922,7 +935,9 @@ const ShogiAI = (() => {
     return { move: pick, kind: mode, why };
   }
 
-  return { suggest, mateSearch, evalMe };
+  // 全合法手を安全度で採点して返す（陣形づくりなどが「損をしない手」を選ぶために使う）
+  function rank(defs, st, mode, ms) { return rootSearch(defs, st, mode || 'def', now() + (ms || 600), 2, true); }
+  return { suggest, mateSearch, evalMe, rank };
 })();
 
 
@@ -1030,6 +1045,252 @@ const ShogiExt = (() => {
   }
   return { sfen, parseMove, parseInfo, lastInfo: () => info, init, ask, why: () => reason, wait: (ms) => (started && state === 'loading' || state === 'idle' ? withTimeout(started || init(), ms, 'timeout').catch(() => state) : Promise.resolve(state)), ready: () => state === 'ready', status: () => state,
     _test: (e) => { eng = e; state = 'ready'; eng.addMessageListener((line) => { if (waiter) waiter(String(line)); }); } };
+})();
+
+
+/* 手の解説と、陣形づくりAI（通常ルール専用の定石データ）。 */
+const ShogiPlan = (() => {
+  'use strict';
+  const S = Shogi;
+  const FILE = '９８７６５４３２１', RANK = '一二三四五六七八九';
+  const sq = (i) => FILE[i % 9] + RANK[(i / 9) | 0];
+  const xy = (i) => [i % 9, (i / 9) | 0];
+  const cost = (defs, pc) => (defs[pc.t] ? S.pieceCost(defs[pc.t]) : 0);
+  const nameOf = (defs, pc) => S.displayName(defs[pc.t], pc);
+  const isKing = (defs, pc) => !!(pc && defs[pc.t] && defs[pc.t].royal);
+  const kingSq = (defs, board, o) => { for (let i = 0; i < 81; i++) { const c = board[i]; if (c && c.o === o && isKing(defs, c)) return i; } return -1; };
+
+  /* ---- 利きの数え上げ ---- */
+  function attackMap(defs, board, o) { // 升 → その升に利いている o の駒の位置（空き升も含む）
+    const m = new Map();
+    for (let i = 0; i < 81; i++) {
+      const c = board[i];
+      if (!c || c.o !== o) continue;
+      for (const t of S.pieceTargets(defs, board, i)) { if (!m.has(t)) m.set(t, []); m.get(t).push(i); }
+    }
+    return m;
+  }
+  const supported = (defs, board, s) => {
+    const me = board[s];
+    for (let i = 0; i < 81; i++) {
+      const c = board[i];
+      if (c && i !== s && c.o === me.o && S.reachSquares(defs, board, i, true).indexOf(s) >= 0) return true;
+    }
+    return false;
+  };
+  /* o の駒でねらわれているもの（損になりそうなものを先に） */
+  function threatsOn(defs, board, o) {
+    const atk = attackMap(defs, board, 1 - o), res = [];
+    for (let s = 0; s < 81; s++) {
+      const v = board[s];
+      if (!v || v.o !== o || isKing(defs, v) || !atk.has(s)) continue;
+      const atts = atk.get(s).slice().sort((a, b) => cost(defs, board[a]) - cost(defs, board[b]));
+      const weak = !supported(defs, board, s);
+      const lose = weak || cost(defs, board[atts[0]]) < cost(defs, v);
+      res.push({ s, atts, weak, lose, v: cost(defs, v) });
+    }
+    return res.sort((a, b) => (b.lose - a.lose) || (b.v - a.v));
+  }
+  function zoneOf(i) {
+    const [x, y] = xy(i), r = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if (nx >= 0 && nx < 9 && ny >= 0 && ny < 9) r.push(ny * 9 + nx); }
+    return r;
+  }
+  const pressure = (defs, board, kingOwner) => { // 玉の周りのうち、相手の利きがある升の数
+    const k = kingSq(defs, board, kingOwner); if (k < 0) return 0;
+    const atk = attackMap(defs, board, 1 - kingOwner);
+    return zoneOf(k).filter((i) => atk.has(i)).length;
+  };
+  const lineKind = (a, b) => {
+    const [ax, ay] = xy(a), [bx, by] = xy(b), dx = Math.abs(ax - bx), dy = Math.abs(ay - by);
+    return dx === 0 ? '縦' : dy === 0 ? '横' : dx === dy ? '斜め' : (dx + dy === 3 && Math.min(dx, dy) === 1 ? '桂の跳び' : '飛び');
+  };
+  const between = (a, b) => { // a と b の間（直線上）の升
+    const [ax, ay] = xy(a), [bx, by] = xy(b), dx = Math.sign(bx - ax), dy = Math.sign(by - ay), r = [];
+    if (!(ax === bx || ay === by || Math.abs(ax - bx) === Math.abs(ay - by))) return r;
+    let x = ax + dx, y = ay + dy;
+    while (x !== bx || y !== by) { r.push(y * 9 + x); x += dx; y += dy; }
+    return r;
+  };
+
+  /* ---- 定石（先手から見た筋・段。後手は180度回して使う） ---- */
+  // c:1 は「囲い」を名乗るための駒。筋は 9→1、段は 一→九。
+  const FORMS = {
+    yagura: { name: '矢倉囲い', style: '居飛車', slots: [['K', 8, 8, 1], ['G', 7, 8, 1], ['S', 7, 7, 1], ['G', 6, 9, 1], ['P', 7, 6]] },
+    mino: { name: '四間飛車・美濃囲い', style: '振り飛車', slots: [['K', 2, 8, 1], ['S', 3, 8, 1], ['G', 4, 9, 1], ['G', 5, 8, 1], ['R', 6, 8]] },
+    anaibi: { name: '居飛車穴熊', style: '居飛車', slots: [['L', 9, 8, 1], ['K', 9, 9, 1], ['S', 8, 8, 1], ['G', 7, 8, 1], ['P', 7, 6], ['B', 7, 7]] },
+    anafuri: { name: '四間飛車・振り飛車穴熊', style: '振り飛車', slots: [['L', 1, 8, 1], ['K', 1, 9, 1], ['S', 2, 8, 1], ['G', 3, 8, 1], ['R', 6, 8]] },
+    shiken: { name: '四間飛車', style: '振り飛車', slots: [['R', 6, 8]] },
+    sanken: { name: '三間飛車', style: '振り飛車', slots: [['R', 7, 8]] },
+    naka: { name: '中飛車', style: '振り飛車', slots: [['R', 5, 8]] },
+  };
+  const slotIdx = (o, f, r) => { let x = 9 - f, y = r - 1; if (o === 1) { x = 8 - x; y = 8 - y; } return y * 9 + x; };
+  const slotText = (s) => ['玉', '金', '銀', '香', '桂', '歩', '飛', '角'][['K', 'G', 'S', 'L', 'N', 'P', 'R', 'B'].indexOf(s[0])] + s[1] + RANK[s[2] - 1];
+  function progress(defs, board, hands, o, form) { // 目標までの距離（小さいほど近い）
+    const slots = form.slots.map((s) => ({ t: s[0], i: slotIdx(o, s[1], s[2]), c: s[3], d: null }));
+    const used = new Set(), pcs = [];
+    board.forEach((c, i) => { if (c && c.o === o && !c.p) pcs.push({ i, t: c.t }); });
+    for (const s of slots) { const c = board[s.i]; if (c && c.o === o && c.t === s.t && !c.p) { s.d = 0; used.add(s.i); } }
+    const pairs = [];
+    slots.forEach((s, si) => { if (s.d === null) for (const p of pcs) if (p.t === s.t && !used.has(p.i)) { const [ax, ay] = xy(p.i), [bx, by] = xy(s.i); pairs.push({ si, pi: p.i, d: Math.max(Math.abs(ax - bx), Math.abs(ay - by)) }); } });
+    pairs.sort((a, b) => a.d - b.d);
+    const usedP = new Set();
+    for (const q of pairs) if (slots[q.si].d === null && !usedP.has(q.pi)) { slots[q.si].d = q.d; usedP.add(q.pi); }
+    const h = Object.assign({}, hands[o] || {});
+    for (const s of slots) if (s.d === null) { if (h[s.t] > 0) { h[s.t]--; s.d = 1; } else s.d = 8; }
+    // 持ち場に別の味方の駒が居座っていたら、どいてもらう必要がある（その分だけ遠い）
+    const block = slots.filter((s) => s.d > 0 && board[s.i] && board[s.i].o === o).length;
+    return { D: slots.reduce((a, s) => a + s.d, 0) + block, filled: slots.filter((s) => s.d === 0).length, total: slots.length, slots };
+  }
+  /* いまの形（囲い・飛車の位置）を言葉にする */
+  function describe(defs, board, o) {
+    const out = [];
+    let rook = null;
+    for (let i = 0; i < 81; i++) { const c = board[i]; if (c && c.o === o && c.t === 'R' && !c.p) { rook = i; break; } }
+    let style = '';
+    if (rook !== null) {
+      const [x, y] = o === 0 ? xy(rook) : [8 - xy(rook)[0], 8 - xy(rook)[1]], f = 9 - x, r = y + 1;
+      if (r === 8) style = { 2: '居飛車', 3: '二間？', 4: '五間飛車', 5: '中飛車', 6: '四間飛車', 7: '三間飛車', 8: '向かい飛車' }[f] || '';
+      if (style === '二間？') style = '';
+    }
+    let castle = '';
+    for (const id of ['yagura', 'mino', 'anaibi', 'anafuri']) {
+      const F = FORMS[id];
+      if (F.slots.filter((s) => s[3]).every((s) => { const c = board[slotIdx(o, s[1], s[2])]; return c && c.o === o && c.t === s[0] && !c.p; })) { castle = F.name.replace(/^.*・/, ''); break; }
+    }
+    return { style, castle, text: [style, castle].filter(Boolean).join('・') + (castle ? '' : (style ? '（囲いは未完成）' : '')) || (kingSq(defs, board, o) === slotIdx(o, 5, 9) ? '居玉（まだ囲っていません）' : '組み立て中') };
+  }
+
+  /* ---- 手の解説 ---- */
+  function explain(defs, st, mode, m, info) {
+    const o = st.turn, opp = 1 - o, board = st.board;
+    const nx = S.applyMove(defs, st, m, true), nb = nx.board;
+    const mover = m.f >= 0 ? board[m.f] : { t: m.t, o, p: false };
+    const moverNm = nameOf(defs, mover), cap = m.f >= 0 ? board[m.to] : null;
+    const where = m.f >= 0 ? sq(m.f) + 'の' + moverNm + 'を' + sq(m.to) + 'へ' : moverNm + 'を' + sq(m.to) + 'に打ちます';
+    const L = [];
+    if (mode === 'def') {
+      const before = threatsOn(defs, board, o), after = threatsOn(defs, nb, o);
+      const t0 = before[0];
+      const myK = kingSq(defs, board, o), inChk = S.inCheck(defs, board, o);
+      if (inChk) {
+        const kat = (attackMap(defs, board, opp).get(myK) || [])[0];
+        L.push('対応：王手をかけている相手の' + (kat != null ? nameOf(defs, board[kat]) + '（' + sq(kat) + '）' : '駒') + 'への対処です。');
+      } else if (t0) {
+        const a = t0.atts[0];
+        L.push('対応：相手の' + nameOf(defs, board[a]) + '（' + sq(a) + '）が、自分の' + nameOf(defs, board[t0.s]) + '（' + sq(t0.s) + '）に' + lineKind(a, t0.s) + 'の利きで届いています' + (t0.weak ? '（守りがない状態）' : '（取られると損）') + '。');
+      } else {
+        const pk = pressure(defs, board, o);
+        L.push(pk ? '対応：相手の駒の利きが、自玉の周り' + pk + '升にかかっています。' : '対応：大きな狙いはまだありません。先回りして守りを整える局面です。');
+      }
+      // 方法
+      let how;
+      if (inChk) how = (isKing(defs, mover) ? '玉を安全な升へ逃がします。' : cap ? nameOf(defs, cap) + 'を取って王手を外します。' : '間に駒を入れて王手を防ぎます。');
+      else if (t0 && cap && t0.atts.indexOf(m.to) >= 0) how = '狙ってきた' + nameOf(defs, cap) + 'を、' + where + '取って消します。';
+      else if (t0 && m.f === t0.s) how = 'ねらわれた' + moverNm + 'を' + sq(m.to) + 'へ逃がします。';
+      else if (t0 && between(t0.atts[0], t0.s).indexOf(m.to) >= 0) how = where + '、相手の利きの途中に駒を置いて遮ります。';
+      else if (t0 && !after.some((x) => x.s === (m.f === t0.s ? m.to : t0.s) && x.lose)) how = where + '、守りの駒を足して、取られても取り返せるようにします。';
+      else if (cap) how = where + '、' + nameOf(defs, cap) + 'を取って相手の攻めの駒を減らします。';
+      else how = where + '、玉の周りの守りを厚くします。';
+      L.push('方法：' + how);
+      const d1 = describe(defs, nb, o), p0 = pressure(defs, board, o), p1 = pressure(defs, nb, o);
+      L.push('守りの形：' + d1.text + '。玉の周りへの相手の利き ' + p0 + '→' + p1 + '升' + (after.some((x) => x.lose) ? '（まだ不安な駒が残ります）' : '。') );
+    } else {
+      const ek = kingSq(defs, board, opp), mk = ek >= 0 ? sq(ek) : '';
+      const attNow = attackMap(defs, nb, o), tg = [];
+      const toI = m.to;
+      for (const s of S.pieceTargets(defs, nb, toI)) { const c = nb[s]; if (c && c.o === opp) tg.push({ s, c, free: !supported(defs, nb, s) }); }
+      const chk = S.inCheck(defs, nb, opp);
+      const lead = nx.res && nx.res.y === 'mate' ? '王を詰ませます。' : chk ? '王手をかけます。' : cap ? nameOf(defs, cap) + 'を取ります。' : '';
+      const hit = tg.filter((t) => !isKing(defs, t.c)).sort((a, b) => cost(defs, b.c) - cost(defs, a.c)).slice(0, 2);
+      L.push('ねらい：' + where + '。' + lead + (hit.length ? (lead ? '' : '') + moverNm + 'が相手の' + hit.map((t) => nameOf(defs, t.c) + '（' + sq(t.s) + (t.free ? '・守りなし' : '') + '）').join('と') + 'に当たります。' : (lead ? '' : '駒を前線へ運び、次の攻めに備えます。')));
+      if (ek >= 0) {
+        const [kx] = xy(ek), [mx2] = xy(toI), kf = 9 - kx, mf = 9 - mx2;
+        const z0 = zoneOf(ek).filter((i) => attackMap(defs, board, o).has(i)).length, z1 = zoneOf(ek).filter((i) => attNow.has(i)).length;
+        const side = kf === mf ? '玉と同じ' + kf + '筋の正面' : mf + '筋側（玉より' + (mf > kf ? '９筋寄り' : '１筋寄り') + '）';
+        L.push('攻め筋：相手玉（' + mk + '）に対して' + side + 'から攻めます。玉の周りへの自分の利き ' + z0 + '→' + z1 + '升。');
+      }
+      const mine = describe(defs, nb, o), theirs = describe(defs, nb, opp);
+      L.push('形：自分は' + mine.text + '、相手は' + theirs.text + '。' + (theirs.castle ? '' : '相手の囲いが未完成のうちに攻める狙いです。'));
+    }
+    if (info) {
+      const ev = info.mate != null ? (info.mate > 0 ? info.mate + '手で詰ます筋' : '詰まされる筋あり') : '評価値' + (info.cp > 0 ? '+' : '') + info.cp + '（' + (info.cp > 150 ? '有利' : info.cp < -150 ? '不利' : '互角') + '）';
+      let cur = st, seq = [];
+      for (const u of info.pv.slice(0, 4)) {
+        const pm = ShogiExt.parseMove(u), lg = S.legalMoves(defs, cur), fm = pm ? S.findMove(lg, pm) : null;
+        if (!fm) break;
+        seq.push(S.notate(defs, cur, fm, lg)); cur = S.applyMove(defs, cur, fm, true);
+      }
+      L.push('エンジンの読み（深さ' + info.depth + '）：' + ev + (seq.length > 1 ? '。想定：' + seq.join(' ') : '。'));
+    }
+    return L;
+  }
+
+  /* ---- 陣形づくり ---- */
+  function formStatus(defs, board, hands, o, id) { const F = FORMS[id]; const p = progress(defs, board, hands, o, F); return { done: p.D === 0, filled: p.filled, total: p.total, D: p.D }; }
+  const lossOf = (defs, board, o) => threatsOn(defs, board, o).filter((t) => t.lose).reduce((a, t) => a + t.v, 0);
+  /* 相手が動かないものとして、自分の手だけで目標まで進む道筋をビームサーチで探し、その最初の一手を選ぶ。
+     最初の一手は、相手に駒をタダ取りされたり詰まされたりしないものだけを使う。 */
+  function nextFormMove(defs, st, id, ms) {
+    const F = FORMS[id], o = st.turn, t0 = Date.now(), limit = ms || 900;
+    const p0 = progress(defs, st.board, st.hands, o, F);
+    if (p0.D === 0) return { done: true, p0 };
+    const ranked = ShogiAI.rank(defs, st, 'def', Math.min(600, limit));
+    if (!ranked.length) return null;
+    const best = ranked[0].s, loss0 = lossOf(defs, st.board, o);
+    const safeFirst = new Map();
+    for (const { m, s } of ranked) {
+      if (s < best - 9) continue;
+      const nx = S.applyMove(defs, st, m, true);
+      if (lossOf(defs, nx.board, o) > loss0 + 4) continue;
+      safeFirst.set(S.encBoard(nx.board) + JSON.stringify(nx.hands) + '|' + (m.f < 0 ? m.t + m.to : m.f + '-' + m.to + (m.p ? '+' : '')), { m, s });
+    }
+    const firsts = new Map(); // 最初の一手の記号 → {m, s}
+    for (const [, v] of safeFirst) firsts.set(v.m.f + ':' + v.m.to + ':' + (v.m.t || '') + ':' + (m_p(v.m)), v);
+    if (!firsts.size) return { stuck: true, p0 };
+    let beam = [], seen = new Set();
+    const K = 14;
+    for (const [key, v] of firsts) {
+      const nx = S.applyMove(defs, st, v.m, true), pr = progress(defs, nx.board, nx.hands, o, F);
+      beam.push({ st: Object.assign({}, nx, { turn: o }), key, v, D: pr.D, steps: 1, pr });
+    }
+    let hit = beam.filter((e) => e.D === 0);
+    for (let depth = 1; depth < 16 && !hit.length && Date.now() - t0 < limit * 3; depth++) {
+      const next = [];
+      for (const e of beam) {
+        for (const m of S.legalMoves(defs, e.st, { noUchi: true })) {
+          const nx = S.applyMove(defs, e.st, m, true), k = S.encBoard(nx.board) + JSON.stringify(nx.hands);
+          if (seen.has(k)) continue; seen.add(k);
+          const pr = progress(defs, nx.board, nx.hands, o, F);
+          next.push({ st: Object.assign({}, nx, { turn: o }), key: e.key, v: e.v, D: pr.D, steps: e.steps + 1, pr: e.pr });
+        }
+      }
+      if (!next.length) break;
+      next.sort((x, y) => x.D - y.D);
+      hit = next.filter((e) => e.D === 0);
+      // 最初の一手が偏らないよう、手ごとに上位をバランスよく残す
+      const per = new Map(), kept = [];
+      for (const e of next) { const c = per.get(e.key) || 0; if (c < 3 && kept.length < K * 3) { per.set(e.key, c + 1); kept.push(e); } }
+      beam = kept.slice(0, K * 3);
+    }
+    if (!hit.length) return { stuck: true, p0 };
+    hit.sort((x, y) => x.steps - y.steps || y.v.s - x.v.s);
+    const w = hit[0], first = w.v.m, nx1 = S.applyMove(defs, st, first, true);
+    return { move: first, p0, p1: progress(defs, nx1.board, nx1.hands, o, F), steps: w.steps };
+  }
+  const m_p = (m) => (m.p ? '+' : '');
+  function explainForm(defs, st, id, m, r) {
+    const F = FORMS[id], o = st.turn, mover = m.f >= 0 ? st.board[m.f] : { t: m.t, o, p: false };
+    const nx = S.applyMove(defs, st, m, true);
+    const slot = r.p1.slots.map((s, i) => ({ s, i })).filter((x) => x.s.t === mover.t).sort((a, b) => a.s.d - b.s.d)[0];
+    const tgt = slot ? F.slots[slot.i] : null;
+    const L = [];
+    L.push('目標：' + F.name + '（' + F.slots.map(slotText).join('・') + '）。いま ' + r.p0.filled + '/' + r.p0.total + ' → この手で ' + r.p1.filled + '/' + r.p1.total + ' 箇所が完成します。');
+    L.push('この手：' + (m.f >= 0 ? sq(m.f) + 'の' : '') + nameOf(defs, mover) + (m.f >= 0 ? 'を' + sq(m.to) + 'へ。' : 'を' + sq(m.to) + 'に打ちます。') + (tgt ? slotText(tgt) + 'の持ち場へ近づきます（あと' + r.p1.slots[slot.i].d + '手ぶん）。' : ''));
+    L.push('安全確認：' + (r.steps ? 'この調子で、あと約' + r.steps + '手で完成する見込みです。' : '') + 'この手で駒損や詰みの筋が出ないことは、数手先まで読んで確かめています。');
+    return L;
+  }
+  return { FORMS, sq, describe, explain, formStatus, nextFormMove, explainForm, slotText, threatsOn, pressure, progress };
 })();
 
 
@@ -1510,9 +1771,9 @@ const ShogiExt = (() => {
     const r = typeof raw.rid === 'string' && /^[a-z0-9]{1,12}$/.test(raw.rid) ? raw.rid : 'x';
     return { v: 1, rid: r, mode: raw.mode === 'orig' ? 'orig' : 'std', ps, b: S.encBoard(board) };
   }
-  function adoptCfg(g, cfg) { g.cfg = cfg; g.mode = cfg.mode; g.customs = cfg.ps; g.defs = S.makeDefs(cfg.ps); g.st = null; g.legal = null; g.ai = null; g.log = []; }
+  function adoptCfg(g, cfg) { g.cfg = cfg; g.mode = cfg.mode; g.customs = cfg.ps; g.defs = S.makeDefs(cfg.ps); g.st = null; g.legal = null; g.ai = null; g.hold = null; g.log = []; }
   const initialState = (g, gid, hs) => S.newState(S.decBoard(g.cfg.b, g.defs, false), { g: gid, hs });
-  const baseGame = (kind) => ({ kind, ai: null, cfg: null, mode: 'std', ph: 'play', customs: [], defs: S.makeDefs([]), st: null, legal: null, sel: null, ask: null, log: [], confirm: null });
+  const baseGame = (kind) => ({ kind, ai: null, hold: null, holdMsg: '', formUi: false, formSel: 'mino', cfg: null, mode: 'std', ph: 'play', customs: [], defs: S.makeDefs([]), st: null, legal: null, sel: null, ask: null, log: [], confirm: null });
   const legalFor = (g) => g.legal || (g.legal = g.st.res ? [] : S.legalMoves(g.defs, g.st));
   const mySide = (g) => {
     if (g.kind !== 'online') return null;
@@ -1537,7 +1798,7 @@ const ShogiExt = (() => {
     bad: '配置が条件を満たしていません。並べ直してください。',
   };
   function enterSetup(g, sr, hs) {
-    Object.assign(g, { ph: 'setup', sr, hs, ai: null, army: null, oppReady: false, setupErr: null, cfg: null, st: null, legal: null, sel: null, ask: null, log: [], confirm: null, customs: [], defs: S.makeDefs([]) });
+    Object.assign(g, { ph: 'setup', sr, hs, ai: null, hold: null, holdMsg: '', formUi: false, army: null, oppReady: false, setupErr: null, cfg: null, st: null, legal: null, sel: null, ask: null, log: [], confirm: null, customs: [], defs: S.makeDefs([]) });
     if (g.kind === 'online' && !g.ed) g.ed = newEd();
   }
   const makeArmy = (board, sr) => ({ sr, ps: usedCustoms(board), b: S.encBoard(board) });
@@ -1949,13 +2210,41 @@ const ShogiExt = (() => {
     g.log = [];
     afterLocalChange(g);
   }
-  /* ---------- AI（攻・守） ---------- */
+  /* ---------- AI（攻・守・陣） ---------- */
+  const GRACE = 3000; // ホールド中は、予告から3秒たつと自動で指す
+  const ShogiExtLoading = () => typeof ShogiExt !== 'undefined' && ShogiExt.status() === 'loading';
+  const sideNow = (g) => (g.kind === 'local' ? g.st.turn : mySide(g));
+  const cancelAi = (g) => { if (g.ai && g.ai.timer) clearTimeout(g.ai.timer); g.ai = null; };
+  function releaseHold(g, msg) { g.hold = null; g.holdMsg = msg || ''; cancelAi(g); render(); }
+  function activateHold(g, mode, formId) {
+    g.hold = { mode, side: sideNow(g), formId: formId || null }; g.holdMsg = '';
+    if (g.ai && g.ai.state !== 'thinking') cancelAi(g);
+    render();
+  }
+  const planSafe = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
   function startAi(g, mode) {
     if (!canAct(g) || (g.ai && g.ai.state === 'thinking')) return;
-    const tok = { mode, state: 'thinking', n: g.st.n, gno: g.st.g };
-    g.ai = tok; g.sel = null; g.confirm = null; render();
+    cancelAi(g);
+    const tok = { mode, state: 'thinking', n: g.st.n, gno: g.st.g, timed: !!g.hold };
+    g.ai = tok; g.sel = null; g.confirm = null; g.holdMsg = ''; render();
+    const finish = (m, r, extra) => {
+      const legal = legalFor(g);
+      Object.assign(tok, { state: 'ready', move: m, kind: r.kind, why: (extra.tip && extra.tip[0]) || r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') }, extra);
+      if (tok.timed) { tok.t0 = Date.now(); tok.timer = setTimeout(() => { if (app.game === g && g.ai === tok && tok.state === 'ready') aiRun(g); }, GRACE); }
+      render();
+    };
     setTimeout(async () => {
       if (app.game !== g || g.ai !== tok || !g.st) return;
+      if (mode === 'form') {
+        const fid = g.hold && g.hold.formId, F = ShogiPlan.FORMS[fid];
+        const r = planSafe(() => ShogiPlan.nextFormMove(g.defs, g.st, fid, 700), null);
+        if (app.game !== g || g.ai !== tok) return;
+        if (r && r.done) return releaseHold(g, '「' + F.name + '」が完成しました。陣形づくりを自動で解除しました。');
+        if (!r || r.stuck || !r.move) return releaseHold(g, '「' + F.name + '」へは、これ以上安全に進められません（相手の攻めや駒の配置のため）。陣形づくりを解除しました。');
+        const m = S.findMove(legalFor(g), r.move);
+        if (!m) return releaseHold(g, '手を選べなかったため、陣形づくりを解除しました。');
+        return finish(m, { kind: 'form', why: '' }, { src: 'plan', tip: planSafe(() => ShogiPlan.explainForm(g.defs, g.st, fid, m, r), null), formNote: r.p1.filled + '/' + r.p1.total });
+      }
       const hasExt = g.mode !== 'orig' && typeof ShogiExt !== 'undefined';
       if (hasExt && ShogiExt.status() === 'loading') { try { await ShogiExt.wait(45000); } catch (e) { /* 内蔵AIで続ける */ } }
       if (app.game !== g || g.ai !== tok) return;
@@ -1966,55 +2255,27 @@ const ShogiExt = (() => {
         let u = null;
         try { u = await ShogiExt.ask(g.st, 1500); } catch (e) { u = null; }
         const em = u ? S.findMove(legalFor(g), ShogiExt.parseMove(u)) : null;
-        if (em) { tipInfo = ShogiExt.lastInfo(); r = { move: em, kind: 'ext', why: mode === 'atk' ? '詰みは見つからないので、エンジンが選んだ最善手です。' : 'エンジンが選んだ、守りを含めた最善手です。' }; src = 'ext'; }
+        if (em) { tipInfo = ShogiExt.lastInfo(); r = { move: em, kind: 'ext', why: '' }; src = 'ext'; }
         else if (!r) { try { r = ShogiAI.suggest(g.defs, g.st, mode, { ms: 1500 }); } catch (e) { r = null; } }
       }
       if (app.game !== g || g.ai !== tok) return;
-      const legal = legalFor(g), m = r && r.move ? S.findMove(legal, r.move) : null;
-      if (!m) Object.assign(tok, { state: 'none' });
-      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, tip: src === 'ext' ? aiTipSafe(g, mode, m, tipInfo) : null, miss: hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンの読み込みが終わっていません（少し待ってからもう一度押してください）' : '') : '', why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
-      render();
+      const m = r && r.move ? S.findMove(legalFor(g), r.move) : null;
+      if (!m) { Object.assign(tok, { state: 'none' }); render(); return; }
+      const tip = planSafe(() => ShogiPlan.explain(g.defs, g.st, mode, m, tipInfo), null);
+      const miss = hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンの読み込みが終わっていません（少し待ってからもう一度押してください）' : '') : '';
+      finish(m, r, { src, tip, miss, why: r.kind === 'mate' || !tip ? r.why : tip[0] });
     }, 60);
   }
-  /* エンジンの読み筋から、3行ほどの説明を作る（マウスを合わせると出る） */
-  function aiTip(g, mode, m, info) {
-    const defs = g.defs, st = g.st, o = st.turn, nm = (t, c) => S.displayName(defs[t], c);
-    const lines = [];
-    const cap = m.f >= 0 ? st.board[m.to] : null, mover = m.f >= 0 ? st.board[m.f] : null;
-    const next = S.applyMove(defs, st, m);
-    const chk = S.inCheck(defs, next.board, 1 - o);
-    const bits = [];
-    if (next.res && next.res.y === 'mate') bits.push('王を詰ませます');
-    else if (chk) bits.push('王手をかけます');
-    if (cap) bits.push(nm(cap.t, cap) + 'を取ります');
-    if (m.f < 0) bits.push('持ち駒を打って戦力を足します');
-    if (m.p) bits.push('駒を成ります');
-    if (!bits.length && mover) bits.push(mover.t === 'K' ? '王の守りを固めます' : '陣形を整え、次の攻防に備えます');
-    lines.push((mode === 'atk' ? '攻め：' : '守り：') + bits.join('・') + '。');
-    if (info) {
-      let ev;
-      if (info.mate != null) ev = info.mate > 0 ? info.mate + '手で詰ます筋があります' : '相手に詰まされる筋があります（' + Math.abs(info.mate) + '手）';
-      else ev = '評価値 ' + (info.cp > 0 ? '+' : '') + info.cp + '（' + (info.cp > 150 ? '自分が有利' : info.cp < -150 ? '自分が不利' : 'ほぼ互角') + '）';
-      lines.push('エンジンの読み（深さ' + info.depth + '）：' + ev + '。');
-      let cur = st, seq = [];
-      for (const u of info.pv.slice(0, 4)) {
-        const pm = ShogiExt.parseMove(u), lg = S.legalMoves(defs, cur), fm = pm ? S.findMove(lg, pm) : null;
-        if (!fm) break;
-        seq.push(S.notate(defs, cur, fm, lg)); cur = S.applyMove(defs, cur, fm);
-      }
-      if (seq.length > 1) lines.push('想定の進行：' + seq.join(' '));
-    }
-    return lines.slice(0, 3);
-  }
-  const aiTipSafe = (g, mode, m, info) => { try { return aiTip(g, mode, m, info); } catch (e) { return null; } };
   function aiRun(g) {
     const ai = g.ai;
     const m = ai && ai.move ? S.findMove(legalFor(g), ai.move) : null;
+    if (ai && ai.timer) clearTimeout(ai.timer);
     if (!m || !canAct(g)) { g.ai = null; render(); return; }
     doMove(g, m);
   }
   function aiPanel(g, act) {
-    const ai = g.ai, busy = !!ai && ai.state === 'thinking';
+    const ai = g.ai, busy = !!ai && ai.state === 'thinking', hold = g.hold;
+    const std = g.mode !== 'orig';
     const pop = h('div', { class: 'ai-pop', role: 'tooltip', id: 'ai-pop' });
     const hidePop = () => pop.classList.remove('on');
     const showPop = (btn, lines) => {
@@ -2022,56 +2283,90 @@ const ShogiExt = (() => {
       pop.classList.add('on');
       const r = btn.getBoundingClientRect(), w = pop.offsetWidth, ph = pop.offsetHeight;
       pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
-      // 指やカーソルの邪魔にならないよう、ボタンの上に出す（入りきらなければ下）
       pop.style.top = (r.top - ph - 10 >= 8 ? r.top - ph - 10 : Math.min(r.bottom + 10, window.innerHeight - ph - 8)) + 'px';
     };
     const btn = (mode, ch, sub) => {
       const mine = !!ai && ai.mode === mode && ai.state === 'ready';
+      const on = !!hold && hold.mode === mode;
       const lines = mine ? (ai.tip || (ai.why ? [ai.why] : null)) : null;
-      let timer = 0, held = false;
+      let timer = 0, timer2 = 0, held = false;
+      const gauge = mine && ai.timed ? h('span', { class: 'gauge', 'aria-hidden': 'true', style: 'animation-duration:' + GRACE + 'ms;animation-delay:-' + (Date.now() - ai.t0) + 'ms' }) : null;
       const el = h('button', {
-        class: 'ai-btn ' + mode + (mine ? ' armed' : ''), type: 'button', disabled: !act || busy, 'aria-pressed': String(mine),
+        class: 'ai-btn ' + mode + (mine ? ' armed' : '') + (on ? ' hold' : ''), type: 'button',
+        disabled: mode === 'form' ? busy : (!act || busy), 'aria-pressed': String(mine || on),
         'aria-describedby': lines ? 'ai-pop' : null,
-        onclick: () => { if (held) { held = false; return; } if (mine) aiRun(g); else startAi(g, mode); },
+        onclick: () => {
+          if (held) { held = false; return; }
+          if (mode === 'form') { if (on) releaseHold(g, '陣形づくりを解除しました。'); else { g.formUi = !g.formUi; render(); } return; }
+          if (mine) aiRun(g); else startAi(g, mode);
+        },
         oncontextmenu: (e) => e.preventDefault(),
-      }, h('span', { class: 'k', 'aria-hidden': 'true' }, ch),
-      h('span', null, h('b', null, mode === 'atk' ? '攻め' : '守り'), h('small', null, mine ? 'もう一度押すと、この手を指します' : sub)));
-      if (lines) {
-        // PC：カーソルが載っている間／スマホ：指で押さえている間だけ、説明を出す
-        el.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') showPop(el, lines); });
-        el.addEventListener('pointerleave', hidePop);
-        el.addEventListener('focus', () => showPop(el, lines));
-        el.addEventListener('blur', hidePop);
+      }, gauge, h('span', { class: 'k', 'aria-hidden': 'true' }, ch),
+      h('span', null, h('b', null, mode === 'atk' ? '攻め' : mode === 'def' ? '守り' : '陣形'),
+        h('small', null, on ? (mode === 'form' ? '組み上げ中（押すと解除）' : '継続中') : mine ? (ai.timed ? '3秒後に自動で指します' : 'もう一度押すと指します') : sub)));
+      if (mode !== 'form') {
+        if (lines) {
+          el.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') showPop(el, lines); });
+          el.addEventListener('pointerleave', hidePop);
+          el.addEventListener('focus', () => showPop(el, lines));
+          el.addEventListener('blur', hidePop);
+        }
         el.addEventListener('pointerdown', (e) => {
-          if (e.pointerType === 'mouse') return;
-          held = false; clearTimeout(timer);
-          timer = setTimeout(() => { held = true; showPop(el, lines); }, 350);
+          held = false; clearTimeout(timer); clearTimeout(timer2);
+          if (lines && e.pointerType !== 'mouse') timer = setTimeout(() => { held = true; showPop(el, lines); }, 350);
+          // 長押し：選んだ手を、あなたの番のたびに自動で続ける（ホールド）
+          timer2 = setTimeout(() => { held = true; hidePop(); activateHold(g, mode); }, 800);
         });
-        const end = () => { clearTimeout(timer); hidePop(); if (held) setTimeout(() => { held = false; }, 400); };
+        const end = () => { clearTimeout(timer); clearTimeout(timer2); hidePop(); if (held) setTimeout(() => { held = false; }, 400); };
         el.addEventListener('pointerup', end);
         el.addEventListener('pointercancel', end);
       }
       return el;
     };
+    const F = ShogiPlan.FORMS;
     let body = null;
-    if (busy) body = h('p', { class: 'ai-msg', role: 'status' }, ShogiExtLoading() ? 'エンジンを読み込んでいます（初回は少し時間がかかります）…' : '考えています…');
+    if (busy) body = h('p', { class: 'ai-msg', role: 'status' }, mode_msg(g, ai));
     else if (ai && ai.state === 'none') body = h('p', { class: 'ai-msg' }, '指せる手が見つかりませんでした。');
     else if (ai && ai.state === 'ready') body = h('div', { class: 'ai-pre' },
-      h('p', { class: 'tag-line' }, (ai.mode === 'atk' ? '攻め' : '守り') + 'の予告手' + (ai.kind === 'mate' ? '（詰み筋）' : '') + '：もう一度同じボタンを押すと指します'),
+      h('p', { class: 'tag-line' }, (ai.mode === 'atk' ? '攻めの予告手' : ai.mode === 'def' ? '守りの予告手' : '陣形づくりの予告手（' + F[hold && hold.formId].name + '・完成 ' + ai.formNote + '）') + (ai.kind === 'mate' ? '（詰み筋）' : '')),
       h('p', { class: 'ai-move' }, ai.text),
-      h('p', { class: 'muted small' }, ai.why),
-      h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI') + (ai.tip ? '　／　ボタンを押さえる（PCはカーソルを載せる）と説明が出ます' : '')),
+      h('p', { class: 'muted small' }, ai.timed ? '約3秒後に自動で指します。読む時間がほしいときは欄外を押してホールドを解除してください。' : 'もう一度同じボタンを押すと指します。'),
+      ai.tip ? h('ul', { class: 'ai-why' }, ai.tip.map((t) => h('li', null, t))) : (ai.why ? h('p', { class: 'muted small' }, ai.why) : null),
+      ai.mode !== 'form' ? h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI')) : null,
       ai.src !== 'ext' && ai.miss ? h('p', { class: 'muted small' }, 'エンジンを使えない理由：' + ai.miss) : null,
-      h('p', { class: 'muted small' }, '盤の枠でかこんだ升が、動かす駒と行き先です。'),
-      h('div', { class: 'row' }, h('button', { class: 'btn quiet', type: 'button', onclick: () => { g.ai = null; render(); } }, 'やめる')));
-
+      h('div', { class: 'row' }, h('button', { class: 'btn quiet', type: 'button', onclick: () => { if (g.hold) releaseHold(g, 'ホールドを解除しました。'); else { cancelAi(g); render(); } } }, 'やめる')));
+    // ホールド状態
+    let status = null;
+    if (hold) {
+      const fs = hold.mode === 'form' ? ShogiPlan.formStatus(g.defs, g.st.board, g.st.hands, hold.side, hold.formId) : null;
+      if (fs && fs.done && !g.doneQ) { g.doneQ = setTimeout(() => { g.doneQ = 0; if (app.game === g && g.hold && g.hold.mode === 'form') releaseHold(g, '「' + F[g.hold.formId].name + '」が完成しました。陣形づくりを自動で解除しました。'); }, 0); }
+      status = h('p', { class: 'ai-hold', role: 'status' }, '● ' + (hold.mode === 'atk' ? '攻めを継続中' : hold.mode === 'def' ? '守りを継続中' : '陣形「' + F[hold.formId].name + '」を組み上げ中（完成 ' + fs.filled + '/' + fs.total + '）') + '　欄外をクリック／タップで解除');
+    }
+    // 陣形の選択
+    let chooser = null;
+    if (g.formUi && !(hold && hold.mode === 'form')) {
+      const cur = g.formSel && F[g.formSel] ? g.formSel : 'mino';
+      chooser = h('div', { class: 'ai-form' },
+        h('label', { class: 'small' }, '組みたい陣形を選ぶ',
+          h('select', { onchange: (e) => { g.formSel = e.target.value; render(); } }, Object.keys(F).map((k) => h('option', { value: k, selected: k === cur }, F[k].name)))),
+        h('p', { class: 'muted small' }, '目標の配置：' + F[cur].slots.map(ShogiPlan.slotText).join('・') + '（先手から見た筋と段。後手は反対側）'),
+        h('p', { class: 'muted small' }, '実行すると、あなたの番のたびに、相手に駒を取られたり詰まされたりしない手だけで、この形へ近づく手を自動で指します。完成すると自動で解除されます。途中で欄外を押すか、「陣形」ボタンをもう一度押すと解除できます。'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', onclick: () => { g.formUi = false; activateHold(g, 'form', cur); } }, 'この陣形で実行'),
+          h('button', { class: 'btn quiet', type: 'button', onclick: () => { g.formUi = false; render(); } }, '閉じる')));
+    }
+    // ホールド中は、自分の番になったら自動で次の予告手を出す
+    if (hold && act && !g.ai && g.st && !g.st.res && sideNow(g) === hold.side && !g.autoQ) {
+      g.autoQ = setTimeout(() => { g.autoQ = 0; if (app.game === g && g.hold && !g.ai && canAct(g) && g.st && !g.st.res && sideNow(g) === g.hold.side) startAi(g, g.hold.mode); }, 250);
+    }
     return h('div', { class: 'ai' },
       h('p', { class: 'ai-h' }, 'AIに一手きく'),
-      h('div', { class: 'ai-btns' }, btn('atk', '攻', '王を詰ませにいく手'), btn('def', '守', '王を守り、攻めを止める手')),
-      !ai && !act ? h('p', { class: 'muted small' }, '自分の番のときに使えます。') : null,
-      body, pop);
+      h('div', { class: 'ai-btns' }, btn('atk', '攻', '王を詰ませにいく手'), btn('def', '守', '王を守り、攻めを止める手'), std ? btn('form', '陣', '選んだ陣形を組む') : null),
+      status, g.holdMsg ? h('p', { class: 'ai-msg', role: 'status' }, g.holdMsg) : null,
+      !ai && !act && !hold ? h('p', { class: 'muted small' }, '自分の番のときに使えます。ボタンを長押しすると、その選択を続けます。') : null,
+      chooser, body, pop);
   }
-  const ShogiExtLoading = () => typeof ShogiExt !== 'undefined' && ShogiExt.status() === 'loading';
+  const mode_msg = (g, ai) => (ai && ai.mode === 'form' ? '陣形づくりの手順を探しています…' : ShogiExtLoading() ? 'エンジンを読み込んでいます（初回は少し時間がかかります）…' : '考えています…');
   function onCell(g, idx) {
     if (!canAct(g)) return;
     const st = g.st;
@@ -2259,6 +2554,14 @@ const ShogiExt = (() => {
   } else if (session && session.kind === 'online') app.pendingResume = session;
   if (!app.game) render();
 
+  // ホールドの解除：AIボタンやその説明の外側（欄外）を押したとき
+  document.addEventListener('pointerdown', (e) => {
+    const g = app.game;
+    if (!g || !g.hold || (e.target.closest && e.target.closest('.ai'))) return;
+    // 1台で両方の側を指すときは、相手側の番に盤を押しても解除しない（相手側の手を指すため）
+    if (g.kind === 'local' && g.st && g.st.turn !== g.hold.side) return;
+    releaseHold(g, 'ホールドを解除しました。');
+  }, true);
   if (STANDALONE) {
     const pend = app.pendingResume;
     app.pendingResume = null;
