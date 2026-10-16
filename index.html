@@ -261,6 +261,14 @@ details.ref summary{padding:8px 12px;cursor:pointer;font-weight:500}
 .cell.hint-from{box-shadow:inset 0 0 0 3px var(--accent)}
 .cell.hint-to{background:var(--sel);box-shadow:inset 0 0 0 3px var(--accent)}
 
+/* エンジンの説明（マウスを合わせる／タップする） */
+.ai-tipwrap{position:relative}
+.ai-move.has-tip{cursor:help;display:inline-block;border-bottom:1px dotted var(--muted)}
+.tip-hint{font-size:.8em;color:var(--muted)}
+.ai-tip{display:none;position:absolute;left:0;top:100%;z-index:5;width:min(28rem,86vw);margin-top:4px;padding:10px 12px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:4px;box-shadow:0 6px 20px rgba(0,0,0,.35);font-size:.88rem;line-height:1.5}
+.ai-tip p+p{margin-top:.35em}
+.ai-tipwrap:hover .ai-tip,.ai-tipwrap:focus-within .ai-tip{display:block}
+
 </style>
 </head>
 <body>
@@ -952,6 +960,15 @@ const ShogiExt = (() => {
     return null;
   }
 
+  /* "info depth 12 score cp 85 pv 7g7f 3c3d" → {depth, cp|mate, pv[]} */
+  function parseInfo(l) {
+    const d = /\bdepth (\d+)/.exec(l), pv = /\bpv ((?:\S+ ?)+)/.exec(l);
+    if (!d || !pv) return null;
+    const cp = /\bscore cp (-?\d+)/.exec(l), mt = /\bscore mate (-?\d+)/.exec(l);
+    if (!cp && !mt) return null;
+    return { depth: Number(d[1]), cp: cp ? Number(cp[1]) : null, mate: mt ? Number(mt[1]) : null, pv: pv[1].trim().split(/\s+/) };
+  }
+  let info = null;
   let state = 'idle', eng = null, waiter = null, started = null, reason = '';
   const fail = (why) => { reason = why; state = 'none'; return state; };
   const withTimeout = (p, ms, why) => Promise.race([p, new Promise((_, ng) => setTimeout(() => ng(new Error(why)), ms))]);
@@ -994,15 +1011,17 @@ const ShogiExt = (() => {
   /* 指し手をUSI文字列で返す。使えない・失敗のときは null */
   async function ask(st, ms) {
     if (state !== 'ready' || !eng) return null;
-    let best = null;
-    const p = waitFor((l) => { if (l.startsWith('bestmove')) { best = l.split(/\s+/)[1] || null; return true; } return false; }, ms + 8000);
+    let best = null; info = null;
+    const p = waitFor((l) => {
+      if (l.startsWith('info ')) { const i = parseInfo(l); if (i && (!info || i.depth >= info.depth)) info = i; return false; }
+      if (l.startsWith('bestmove')) { best = l.split(/\s+/)[1] || null; return true; } return false; }, ms + 8000);
     eng.postMessage('position sfen ' + sfen(st));
     eng.postMessage('go movetime ' + ms);
     const ok = await p;
     if (!ok) { eng.postMessage('stop'); return null; }
     return best && parseMove(best) ? best : null;
   }
-  return { sfen, parseMove, init, ask, why: () => reason, wait: (ms) => (started && state === 'loading' || state === 'idle' ? withTimeout(started || init(), ms, 'timeout').catch(() => state) : Promise.resolve(state)), ready: () => state === 'ready', status: () => state,
+  return { sfen, parseMove, parseInfo, lastInfo: () => info, init, ask, why: () => reason, wait: (ms) => (started && state === 'loading' || state === 'idle' ? withTimeout(started || init(), ms, 'timeout').catch(() => state) : Promise.resolve(state)), ready: () => state === 'ready', status: () => state,
     _test: (e) => { eng = e; state = 'ready'; eng.addMessageListener((line) => { if (waiter) waiter(String(line)); }); } };
 })();
 
@@ -1934,22 +1953,53 @@ const ShogiExt = (() => {
       if (hasExt && ShogiExt.status() === 'loading') { try { await ShogiExt.wait(20000); } catch (e) { /* 内蔵AIで続ける */ } }
       if (app.game !== g || g.ai !== tok) return;
       const useExt = hasExt && ShogiExt.ready();
-      let r = null, src = 'int';
+      let r = null, src = 'int', tipInfo = null;
       try { r = (mode === 'atk' || !useExt) ? ShogiAI.suggest(g.defs, g.st, mode, { ms: useExt ? 700 : 1500 }) : null; } catch (e) { r = null; }
       if (useExt && !(r && r.kind === 'mate')) {
         let u = null;
         try { u = await ShogiExt.ask(g.st, 1500); } catch (e) { u = null; }
         const em = u ? S.findMove(legalFor(g), ShogiExt.parseMove(u)) : null;
-        if (em) { r = { move: em, kind: 'ext', why: mode === 'atk' ? '詰みは見つからないので、エンジンが選んだ最善手です。' : 'エンジンが選んだ、守りを含めた最善手です。' }; src = 'ext'; }
+        if (em) { tipInfo = ShogiExt.lastInfo(); r = { move: em, kind: 'ext', why: mode === 'atk' ? '詰みは見つからないので、エンジンが選んだ最善手です。' : 'エンジンが選んだ、守りを含めた最善手です。' }; src = 'ext'; }
         else if (!r) { try { r = ShogiAI.suggest(g.defs, g.st, mode, { ms: 1500 }); } catch (e) { r = null; } }
       }
       if (app.game !== g || g.ai !== tok) return;
       const legal = legalFor(g), m = r && r.move ? S.findMove(legal, r.move) : null;
       if (!m) Object.assign(tok, { state: 'none' });
-      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, miss: hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンを読み込み中です' : '') : '', why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
+      else Object.assign(tok, { state: 'ready', move: m, kind: r.kind, src, tip: src === 'ext' ? aiTipSafe(g, mode, m, tipInfo) : null, miss: hasExt && !useExt ? ShogiExt.why() || (ShogiExt.status() === 'loading' ? 'エンジンを読み込み中です' : '') : '', why: r.why, text: S.notate(g.defs, g.st, m, legal) + (m.f < 0 ? '（持ち駒を打つ）' : '') });
       render();
     }, 60);
   }
+  /* エンジンの読み筋から、3行ほどの説明を作る（マウスを合わせると出る） */
+  function aiTip(g, mode, m, info) {
+    const defs = g.defs, st = g.st, o = st.turn, nm = (t, c) => S.displayName(defs[t], c);
+    const lines = [];
+    const cap = m.f >= 0 ? st.board[m.to] : null, mover = m.f >= 0 ? st.board[m.f] : null;
+    const next = S.applyMove(defs, st, m);
+    const chk = S.inCheck(defs, next.board, 1 - o);
+    const bits = [];
+    if (next.res && next.res.y === 'mate') bits.push('王を詰ませます');
+    else if (chk) bits.push('王手をかけます');
+    if (cap) bits.push(nm(cap.t, cap) + 'を取ります');
+    if (m.f < 0) bits.push('持ち駒を打って戦力を足します');
+    if (m.p) bits.push('駒を成ります');
+    if (!bits.length && mover) bits.push(mover.t === 'K' ? '王の守りを固めます' : '陣形を整え、次の攻防に備えます');
+    lines.push((mode === 'atk' ? '攻め：' : '守り：') + bits.join('・') + '。');
+    if (info) {
+      let ev;
+      if (info.mate != null) ev = info.mate > 0 ? info.mate + '手で詰ます筋があります' : '相手に詰まされる筋があります（' + Math.abs(info.mate) + '手）';
+      else ev = '評価値 ' + (info.cp > 0 ? '+' : '') + info.cp + '（' + (info.cp > 150 ? '自分が有利' : info.cp < -150 ? '自分が不利' : 'ほぼ互角') + '）';
+      lines.push('エンジンの読み（深さ' + info.depth + '）：' + ev + '。');
+      let cur = st, seq = [];
+      for (const u of info.pv.slice(0, 4)) {
+        const pm = ShogiExt.parseMove(u), lg = S.legalMoves(defs, cur), fm = pm ? S.findMove(lg, pm) : null;
+        if (!fm) break;
+        seq.push(S.notate(defs, cur, fm, lg)); cur = S.applyMove(defs, cur, fm);
+      }
+      if (seq.length > 1) lines.push('想定の進行：' + seq.join(' '));
+    }
+    return lines.slice(0, 3);
+  }
+  const aiTipSafe = (g, mode, m, info) => { try { return aiTip(g, mode, m, info); } catch (e) { return null; } };
   function aiRun(g) {
     const ai = g.ai;
     const m = ai && ai.move ? S.findMove(legalFor(g), ai.move) : null;
@@ -1967,7 +2017,9 @@ const ShogiExt = (() => {
     else if (ai && ai.state === 'none') body = h('p', { class: 'ai-msg' }, '指せる手が見つかりませんでした。');
     else if (ai && ai.state === 'ready') body = h('div', { class: 'ai-pre' },
       h('p', { class: 'tag-line' }, (ai.mode === 'atk' ? '攻め' : '守り') + 'の予告手' + (ai.kind === 'mate' ? '（詰み筋）' : '')),
-      h('p', { class: 'ai-move' }, ai.text),
+      ai.tip ? h('div', { class: 'ai-tipwrap' },
+        h('p', { class: 'ai-move has-tip', tabindex: '0', 'aria-describedby': 'ai-tip' }, ai.text, h('span', { class: 'tip-hint', 'aria-hidden': 'true' }, ' ⓘ')),
+        h('div', { class: 'ai-tip', id: 'ai-tip', role: 'tooltip' }, ai.tip.map((t) => h('p', null, t)))) : h('p', { class: 'ai-move' }, ai.text),
       h('p', { class: 'muted small' }, ai.why),
       h('p', { class: 'muted small' }, '判断：' + (ai.src === 'ext' ? '将棋エンジン（やねうら王）' : '内蔵AI')),
       ai.src !== 'ext' && ai.miss ? h('p', { class: 'muted small' }, 'エンジンを使えない理由：' + ai.miss) : null,
